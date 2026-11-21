@@ -214,12 +214,14 @@ Window {
     Shortcut { sequence: "N"; enabled: win.keysFree; context: Qt.ApplicationShortcut; onActivated: win.controls.toggle("night") }
     Shortcut { sequence: "S"; enabled: win.keysFree; context: Qt.ApplicationShortcut; onActivated: win.controls.toggle("saver") }
     Shortcut { sequence: "A"; enabled: win.keysFree; context: Qt.ApplicationShortcut; onActivated: win.controls.toggle("awake") }
-    Shortcut { sequence: "E"; enabled: win.keysFree && win.page === "overview"; context: Qt.ApplicationShortcut; onActivated: win.controls.cycleDisplay() }
+    Shortcut { sequence: "E"; enabled: win.keysFree && win.page === "overview" && win.controls.display !== "desktop"; context: Qt.ApplicationShortcut; onActivated: win.controls.cycleDisplay() }
     Shortcut { sequence: ","; enabled: win.keysFree; context: Qt.ApplicationShortcut; onActivated: win.controls.setBrightness(win.controls.brightness - 0.1) }
     Shortcut { sequence: "."; enabled: win.keysFree; context: Qt.ApplicationShortcut; onActivated: win.controls.setBrightness(win.controls.brightness + 0.1) }
     Shortcut { sequence: "-"; enabled: win.keysFree; context: Qt.ApplicationShortcut; onActivated: win.controls.setVolume(win.controls.volume - 0.1) }
     Shortcut { sequences: ["=", "+"]; enabled: win.keysFree; context: Qt.ApplicationShortcut; onActivated: win.controls.setVolume(win.controls.volume + 0.1) }
     Shortcut { sequence: "M"; enabled: win.keysFree && win.page === "overview"; context: Qt.ApplicationShortcut; onActivated: win.controls.toggleMute() }
+    Shortcut { sequence: "U"; enabled: win.keysFree && win.page === "overview"; context: Qt.ApplicationShortcut; onActivated: win.controls.toggleMicMute() }
+    Shortcut { sequence: "O"; enabled: win.keysFree && win.page === "overview"; context: Qt.ApplicationShortcut; onActivated: win.controls.cycleAudioOutput() }
     Shortcut { sequence: "/"; enabled: win.keysFree; context: Qt.ApplicationShortcut; onActivated: win.startSearch() }
     Shortcut { sequence: "C"; enabled: win.keysFree && win.page === "details"; context: Qt.ApplicationShortcut; onActivated: backend.sortByMemory = false }
     Shortcut { sequence: "M"; enabled: win.keysFree && win.page === "details"; context: Qt.ApplicationShortcut; onActivated: backend.sortByMemory = true }
@@ -343,7 +345,23 @@ Window {
                 width: win.column - 16
                 spacing: 4
                 PlainText { text: win.modeLabels[win.controls.mode] || ""; color: theme.secondary; font.pixelSize: 12 }
-                PlainText { width: parent.width; text: win.controls.network; color: theme.secondary; font.pixelSize: 11; elide: Text.ElideRight }
+                PlainText {
+                    width: parent.width
+                    text: win.controls.network
+                    color: networkArea.containsMouse ? theme.foreground : theme.secondary
+                    font.pixelSize: 11
+                    font.underline: networkArea.containsMouse && win.controls.network !== ""
+                    elide: Text.ElideRight
+                    MouseArea {
+                        id: networkArea
+                        anchors.fill: parent
+                        anchors.margins: -4
+                        enabled: win.controls.network !== ""
+                        hoverEnabled: true
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: win.controls.openNetwork()
+                    }
+                }
             }
             Column {
                 id: heroText
@@ -390,6 +408,17 @@ Window {
                     color: theme.secondary
                     font.pixelSize: 11
                 }
+            }
+        }
+
+        Section {
+            visible: backend.failedServices.length > 0
+            label: "Attention"
+            PlainText {
+                width: parent.width
+                text: backend.failedServices.join("  ·  ") + (backend.failedServices.length === 1 ? " failed to run." : " failed to run.")
+                color: theme.warn
+                wrapMode: Text.WordWrap
             }
         }
 
@@ -463,6 +492,7 @@ Window {
         Section {
             id: levels
             label: "Levels"
+            spacing: 14
             Row {
                 spacing: 28
                 Repeater {
@@ -490,10 +520,48 @@ Window {
                     }
                 }
             }
+            Row {
+                spacing: 28
+                Lamp {
+                    width: (levels.width - win.column - 28) / 2
+                    on: !win.controls.micMuted
+                    label: win.controls.micMuted ? "Microphone, muted" : "Microphone"
+                    onClicked: win.controls.toggleMicMute()
+                }
+                Item {
+                    visible: win.controls.audioOutput !== ""
+                    width: (levels.width - win.column - 28) / 2
+                    height: 20
+                    PlainText {
+                        anchors { left: parent.left; right: audioSwitchHint.left; rightMargin: 10; verticalCenter: parent.verticalCenter }
+                        text: win.controls.audioOutput
+                        color: audioOutArea.containsMouse ? theme.foreground : theme.secondary
+                        font.pixelSize: 12
+                        font.underline: audioOutArea.containsMouse
+                        elide: Text.ElideRight
+                    }
+                    PlainText {
+                        id: audioSwitchHint
+                        anchors { right: parent.right; verticalCenter: parent.verticalCenter }
+                        text: "Switch"
+                        color: audioOutArea.containsMouse ? theme.foreground : theme.muted
+                        font.pixelSize: 11
+                    }
+                    MouseArea {
+                        id: audioOutArea
+                        anchors.fill: parent
+                        anchors.margins: -4
+                        hoverEnabled: true
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: win.controls.cycleAudioOutput()
+                    }
+                }
+            }
         }
 
         Section {
             id: screens
+            visible: win.controls.display !== "desktop"
             label: "Screens"
             PlainText {
                 visible: win.controls.display === "laptop"
@@ -536,7 +604,21 @@ Window {
         Section {
             visible: win.controls.devices !== ""
             label: "Devices"
-            PlainText { width: parent.width; text: win.controls.devices; wrapMode: Text.WordWrap }
+            PlainText {
+                width: parent.width
+                text: win.controls.devices
+                color: devicesArea.containsMouse ? theme.foreground : theme.secondary
+                font.underline: devicesArea.containsMouse
+                wrapMode: Text.WordWrap
+                MouseArea {
+                    id: devicesArea
+                    anchors.fill: parent
+                    anchors.margins: -4
+                    hoverEnabled: true
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: win.controls.openBluetooth()
+                }
+            }
         }
 
         Section {
@@ -855,8 +937,13 @@ Window {
                     MouseArea {
                         id: rowArea
                         anchors.fill: parent
+                        acceptedButtons: Qt.LeftButton | Qt.RightButton
                         hoverEnabled: true
-                        onClicked: win.selectedPid = processRow.process.pid
+                        onClicked: mouse => {
+                            win.selectedPid = processRow.process.pid
+                            if (mouse.button === Qt.RightButton)
+                                win.askToEndProcess(processRow.process.pid)
+                        }
                         onDoubleClicked: win.askToEndProcess(processRow.process.pid)
                     }
                     PlainText {
@@ -1251,12 +1338,13 @@ Window {
                     ["E", "Screens: both, or monitor only"],
                     [",  .   -  =", "Brightness down and up, volume down and up"],
                     ["M", "Mute on the overview; sort by memory on details"],
+                    ["U", "Mute or unmute microphone on the overview"],
                     ["C", "Sort processes by processor"],
                     ["/", "Find a process"],
                     ["↑ ↓   J K", "Pick a process or a folder"],
                     ["X   Delete", "End the picked process"],
                     ["Enter   ⌫", "Into a folder, back out"],
-                    ["O   R", "Open in the file manager, rescan the disk"],
+                    ["O   R", "Switch audio output (overview), open folder or rescan (storage)"],
                     ["V", "Busiest now, or heaviest since opened"],
                     ["P", "Battery care: stop charging at 80%"],
                     ["T", "Light or dark, until Keel closes"],

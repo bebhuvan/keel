@@ -24,6 +24,8 @@ class Controls : public QObject {
     Q_PROPERTY(double brightness READ brightness NOTIFY changed)
     Q_PROPERTY(double volume READ volume NOTIFY changed)
     Q_PROPERTY(bool muted READ muted NOTIFY changed)
+    Q_PROPERTY(bool micMuted READ micMuted NOTIFY changed)
+    Q_PROPERTY(QString audioOutput READ audioOutput NOTIFY changed)
     Q_PROPERTY(QString display READ display NOTIFY changed)
     Q_PROPERTY(QString monitor READ monitor NOTIFY changed)
     Q_PROPERTY(QString devices READ devices NOTIFY changed)
@@ -48,6 +50,10 @@ class Controls : public QObject {
     static QString parseNetwork(const QByteArray &devices);
     // Volume 0..1 and whether it is muted, from `wpctl get-volume`.
     static bool parseVolume(const QByteArray &reply, double &volume, bool &muted);
+    // Brightness 0..1 from `omarchy-brightness-display` (0..100 integer).
+    static bool parseBrightness(const QByteArray &reply, double &level);
+    // Human-readable output name from `wpctl inspect @DEFAULT_AUDIO_SINK@`.
+    static QString parseAudioOutput(const QByteArray &inspectReply);
 
     // How the screens are arranged, from Hyprland's `j/monitors all`:
     // "both", "monitor" (laptop screen off), "mirror", or "laptop" when no
@@ -62,6 +68,8 @@ class Controls : public QObject {
     double brightness() const { return m_brightness; }
     double volume() const { return m_volume; }
     bool muted() const { return m_muted; }
+    bool micMuted() const { return m_micMuted; }
+    QString audioOutput() const { return m_audioOutput; }
     QString display() const { return m_display; }
     QString monitor() const { return m_monitor; }
     // Connected devices that report a battery: "wh-1000xm4 80% · mx master 3 55%".
@@ -78,6 +86,10 @@ class Controls : public QObject {
     Q_INVOKABLE void setBrightness(double level);
     Q_INVOKABLE void setVolume(double level);
     Q_INVOKABLE void toggleMute();
+    Q_INVOKABLE void toggleMicMute();
+    Q_INVOKABLE void cycleAudioOutput();
+    Q_INVOKABLE void openNetwork();
+    Q_INVOKABLE void openBluetooth();
     Q_INVOKABLE void setDisplay(const QString &choice);
     Q_INVOKABLE void cycleDisplay();
     // Asks for the password once (the system prompt), then writes the limit
@@ -124,6 +136,8 @@ class Controls : public QObject {
     double m_brightness = -1;
     double m_volume = -1;
     bool m_muted = false;
+    bool m_micMuted = false;
+    QString m_audioOutput;
     QString m_display = "laptop";
     QString m_monitor;
     QString m_devices;

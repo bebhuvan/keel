@@ -33,6 +33,7 @@ class Backend : public QObject {
     Q_PROPERTY(QVariantList upHistory READ upHistory NOTIFY sampled)
     Q_PROPERTY(QString downPeak READ downPeak NOTIFY sampled)
     Q_PROPERTY(QString upPeak READ upPeak NOTIFY sampled)
+    Q_PROPERTY(QStringList failedServices READ failedServices NOTIFY sampled)
     Q_PROPERTY(Controls *controls READ controls CONSTANT)
 
   public:
@@ -62,7 +63,11 @@ class Backend : public QObject {
     QVariantList upHistory() const { return scaled(m_upHistory, peak(m_upHistory)); }
     QString downPeak() const;
     QString upPeak() const;
+    QStringList failedServices() const { return m_failedServices; }
     Controls *controls() { return &m_controls; }
+
+    // Unit names from `systemctl --failed --no-legend --plain`.
+    static QStringList parseFailedUnits(const QByteArray &output);
 
     // Closes windows gracefully, as their close buttons would, so apps can
     // ask to save. Takes the addresses the window showed, not a list
@@ -82,6 +87,7 @@ class Backend : public QObject {
   private:
     void sample();
     void findSensors();
+    void checkFailedServices();
     void publishHeavy(const QList<apps::Window> &windows);
     void publishDetails(const QByteArray &stat, double cpuPercent, const vitals::Memory &memory,
                         const vitals::Reading &reading, double celsius, double uptime, qint64 nowMs);
@@ -119,6 +125,9 @@ class Backend : public QObject {
     bool m_sortByMemory = false;
     bool m_detailed = false;
     bool m_showHeavy = false;
+    bool m_kernelUpdated = false;
+    bool m_failedQueryPending = false;
+    QStringList m_failedServices;
     QString m_filter;
     QList<double> m_cpuHistory, m_heatHistory, m_downHistory, m_upHistory;
 };

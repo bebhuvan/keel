@@ -5,6 +5,10 @@ doing in plain words, puts the switches you reach for in one place, shows which 
 and finds what's filling your disk. It's a small, fast native app, made for people who find btop
 too much.
 
+| Light | Dark |
+| --- | --- |
+| ![Keel overview in light mode](docs/overview-light.png) | ![Keel overview in dark mode](docs/overview-dark.png) |
+
 It has three pages; **Tab** moves between them.
 
 - **Overview.** One headline ("All calm.", "Running hot.", "Disk nearly full."), how long the
@@ -41,12 +45,13 @@ It runs only while its window is open; press Esc and it's gone.
 | `,` `.` | brightness down / up |
 | `-` `=` | volume down / up |
 | `m` | mute (overview) · sort by memory (details) |
+| `u` | mute or unmute microphone (overview) |
 | `c` | sort processes by CPU |
 | `/` | find a process |
 | `↑` `↓` / `j` `k` | pick a process or folder |
 | `x` / `Delete` | end the picked process |
 | `Enter` / `Backspace` | into a folder / back out (storage) |
-| `o` | open the picked folder in the file manager |
+| `o` | switch audio output (overview) · open the picked folder in the file manager (storage) |
 | `r` | rescan the disk |
 | `v` | busiest now / heaviest since opened |
 | `p` | battery care on / off (asks for your password) |

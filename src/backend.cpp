@@ -6,8 +6,10 @@
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QProcess>
 #include <QVariantMap>
 #include <sys/statvfs.h>
+#include <sys/utsname.h>
 #include <unistd.h>
 
 namespace {
@@ -53,6 +55,17 @@ QString uptimeText(double seconds) {
     if (minutes >= 24 * 60)
         return QString("%1d %2h").arg(minutes / 1440).arg((minutes % 1440) / 60);
     return vitals::durationText(minutes);
+}
+
+// On Arch Linux, upgrading the kernel package replaces /usr/lib/modules/<old>,
+// so the running kernel's module directory disappears until the next reboot.
+bool isKernelUpdated() {
+    if (!QFileInfo::exists("/usr/lib/modules"))
+        return false;
+    struct utsname u{};
+    if (uname(&u) != 0)
+        return false;
+    return !QFileInfo::exists(QString("/usr/lib/modules/") + QString::fromLocal8Bit(u.release));
 }
 
 } // namespace
@@ -166,6 +179,9 @@ void Backend::sample() {
     reading.diskFreeBytes = diskFree;
     reading.diskTotalBytes = diskTotal;
     reading.uptimeSeconds = uptime;
+    if (m_tick % 5 == 0)
+        m_kernelUpdated = isKernelUpdated();
+    reading.kernelUpdated = m_kernelUpdated;
     // The calm headline belongs to the mode, which the window knows; this
     // one stands in when no mode matches.
     m_summary = vitals::summarize(reading, "All calm.", QDateTime::currentDateTime());
@@ -228,9 +244,51 @@ void Backend::sample() {
     // The reads that start a process (do not disturb, night light, volume,
     // network name) come every fifth tick; a change made in Keel refreshes
     // them at once anyway.
-    if (m_tick++ % 5 == 0)
+    if (m_tick++ % 5 == 0) {
         m_controls.refreshSlow();
+        checkFailedServices();
+    }
     emit sampled();
+}
+
+QStringList Backend::parseFailedUnits(const QByteArray &output) {
+    QStringList units;
+    for (const QByteArray &line : output.split('\n')) {
+        const QByteArray trimmed = line.trimmed();
+        if (trimmed.isEmpty())
+            continue;
+        QString unit = QString::fromUtf8(trimmed.split(' ').first());
+        if (unit.endsWith(QLatin1String(".service")))
+            unit.chop(8);
+        if (!unit.isEmpty() && !units.contains(unit))
+            units.append(unit);
+    }
+    return units;
+}
+
+void Backend::checkFailedServices() {
+    if (m_failedQueryPending)
+        return;
+    m_failedQueryPending = true;
+    auto *process = new QProcess(this);
+    auto done = [this, process](bool ok) {
+        m_failedQueryPending = false;
+        if (ok) {
+            const QStringList units = parseFailedUnits(process->readAllStandardOutput());
+            if (units != m_failedServices) {
+                m_failedServices = units;
+                emit sampled();
+            }
+        }
+        process->deleteLater();
+    };
+    connect(process, &QProcess::finished, this, [done](int code) { done(code == 0); });
+    connect(process, &QProcess::errorOccurred, this, [done](QProcess::ProcessError error) {
+        if (error == QProcess::FailedToStart)
+            done(false);
+    });
+    process->start("sh", {"-c", "systemctl --failed --no-legend --plain 2>/dev/null; "
+                                "systemctl --user --failed --no-legend --plain 2>/dev/null; true"});
 }
 
 void Backend::publishHeavy(const QList<apps::Window> &windows) {

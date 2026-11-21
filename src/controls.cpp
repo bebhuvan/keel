@@ -165,9 +165,41 @@ bool Controls::parseVolume(const QByteArray &reply, double &volume, bool &muted)
     return true;
 }
 
+bool Controls::parseBrightness(const QByteArray &reply, double &level) {
+    bool ok = false;
+    const double pct = reply.trimmed().toDouble(&ok);
+    if (!ok || pct < 0 || pct > 100)
+        return false;
+    level = pct / 100.0;
+    return true;
+}
+
+QString Controls::parseAudioOutput(const QByteArray &inspectReply) {
+    QString nick, description, device;
+    static const QRegularExpression linePattern("^\\s*\\*?\\s*([a-zA-Z0-9._-]+)\\s*=\\s*\"([^\"]*)\"");
+    for (const QByteArray &line : inspectReply.split('\n')) {
+        const auto match = linePattern.match(QString::fromUtf8(line));
+        if (!match.hasMatch())
+            continue;
+        const QString key = match.captured(1);
+        const QString val = match.captured(2).trimmed();
+        if (key == "node.nick" && nick.isEmpty())
+            nick = val;
+        else if (key == "node.description" && description.isEmpty())
+            description = val;
+        else if (key == "device.description" && device.isEmpty())
+            device = val;
+    }
+    if (!nick.isEmpty())
+        return nick;
+    if (!description.isEmpty())
+        return description;
+    return device;
+}
+
 QString Controls::parseDisplay(const QByteArray &monitorsJson, QString &name) {
     static const QRegularExpression internal("^(eDP|LVDS|DSI)-");
-    bool laptopOn = false, externalOn = false, mirrored = false;
+    bool hasInternal = false, laptopOn = false, externalOn = false, mirrored = false;
     name.clear();
     for (const QJsonValue &value : QJsonDocument::fromJson(monitorsJson).array()) {
         const QJsonObject monitor = value.toObject();
@@ -178,6 +210,7 @@ QString Controls::parseDisplay(const QByteArray &monitorsJson, QString &name) {
         if (monitor.value("mirrorOf").toString("none") != "none")
             mirrored = true;
         if (internal.match(output).hasMatch()) {
+            hasInternal = true;
             laptopOn = laptopOn || on;
         } else if (on) {
             externalOn = true;
@@ -194,6 +227,8 @@ QString Controls::parseDisplay(const QByteArray &monitorsJson, QString &name) {
             }
         }
     }
+    if (!hasInternal)
+        return "desktop";
     if (!externalOn)
         return "laptop";
     if (mirrored)
@@ -274,7 +309,10 @@ void Controls::refresh() {
     update("wifi", radioOn("wlan"));
     update("bluetooth", radioOn("bluetooth"));
     update("awake", QFileInfo::exists(m_stateDirectory + "/stay-awake"));
-    if (!m_backlightDirectory.isEmpty() && !m_wantedLevels.contains("brightness") &&
+    // When only the laptop panel is active, reading sysfs is free; with an
+    // external monitor attached, refreshSlow() reads the focused display via
+    // omarchy-brightness-display (which handles DDC/CI as well as backlight).
+    if (m_display == "laptop" && !m_backlightDirectory.isEmpty() && !m_wantedLevels.contains("brightness") &&
         !m_pending.contains("brightness")) {
         const double max = readFile(m_backlightDirectory + "/max_brightness").toDouble();
         const double level = max > 0 ? readFile(m_backlightDirectory + "/brightness").toDouble() / max : -1;
@@ -402,6 +440,14 @@ void Controls::refreshSlow() {
                   emit changed();
               }
           });
+    if (!m_wantedLevels.contains("brightness") && !m_pending.contains("brightness"))
+        query("brightness", "omarchy-brightness-display", {}, [this](const QByteArray &reply) {
+            double level = -1;
+            if (parseBrightness(reply, level) && !qFuzzyCompare(level + 2, m_brightness + 2)) {
+                m_brightness = level;
+                emit changed();
+            }
+        });
     if (!m_wantedLevels.contains("volume"))
         query("volume", "wpctl", {"get-volume", "@DEFAULT_AUDIO_SINK@"}, [this](const QByteArray &reply) {
             double volume = 0;
@@ -409,6 +455,23 @@ void Controls::refreshSlow() {
             if (parseVolume(reply, volume, muted) && (volume != m_volume || muted != m_muted)) {
                 m_volume = volume;
                 m_muted = muted;
+                emit changed();
+            }
+        });
+    if (!m_pending.contains("mic"))
+        query("mic", "wpctl", {"get-volume", "@DEFAULT_AUDIO_SOURCE@"}, [this](const QByteArray &reply) {
+            double volume = 0;
+            bool muted = false;
+            if (parseVolume(reply, volume, muted) && muted != m_micMuted) {
+                m_micMuted = muted;
+                emit changed();
+            }
+        });
+    if (!m_pending.contains("audioOutput"))
+        query("audioOutput", "wpctl", {"inspect", "@DEFAULT_AUDIO_SINK@"}, [this](const QByteArray &reply) {
+            const QString output = parseAudioOutput(reply);
+            if (!output.isEmpty() && output != m_audioOutput) {
+                m_audioOutput = output;
                 emit changed();
             }
         });
@@ -459,8 +522,6 @@ void Controls::set(const QString &id, bool on) {
 }
 
 void Controls::setBrightness(double level) {
-    if (m_backlightDirectory.isEmpty())
-        return fail("this screen's brightness can't be changed from here.");
     // Never fully dark: a black screen with no way back is no use.
     m_brightness = qBound(0.05, level, 1.0);
     m_wantedLevels.insert("brightness", m_brightness);
@@ -480,8 +541,10 @@ void Controls::setVolume(double level) {
 // Hyprland's output list to settle before allowing another switch. Never
 // chains two reloads back to back.
 void Controls::setDisplay(const QString &choice) {
+    if (m_display == "desktop")
+        return;
     if (m_display == "laptop")
-        return fail("no external monitor is connected.");
+        return fail("No external monitor is connected.");
     if (!displayChoices().contains(choice) || m_pending.contains("display") || choice == m_display)
         return;
     const bool fromMirror = m_display == "mirror";
@@ -545,8 +608,31 @@ void Controls::toggleMute() {
         return;
     m_muted = !m_muted;
     emit changed();
-    run("mute", "couldn't change mute. try again in a moment.", "wpctl",
+    run("mute", "Couldn't change mute. Try again in a moment.", "wpctl",
         {"set-mute", "@DEFAULT_AUDIO_SINK@", m_muted ? "1" : "0"});
+}
+
+void Controls::toggleMicMute() {
+    if (m_pending.contains("mic"))
+        return;
+    m_micMuted = !m_micMuted;
+    emit changed();
+    run("mic", "Couldn't change microphone mute. Try again in a moment.", "omarchy-audio-input-mute", {});
+}
+
+void Controls::cycleAudioOutput() {
+    if (m_pending.contains("audioOutput"))
+        return;
+    run("audioOutput", "Couldn't switch audio output. Try again in a moment.", "omarchy-audio-output-switch",
+        {});
+}
+
+void Controls::openNetwork() {
+    QProcess::startDetached("omarchy-shell", {"-q", "shell", "toggle", "omarchy.network"});
+}
+
+void Controls::openBluetooth() {
+    QProcess::startDetached("omarchy-shell", {"-q", "shell", "toggle", "omarchy.bluetooth"});
 }
 
 // Holding a key sends many changes; only one command runs at a time and the
@@ -557,8 +643,8 @@ void Controls::applyLevel(const QString &id) {
     const double level = m_wantedLevels.take(id);
     m_pending.insert(id);
     if (id == "brightness")
-        run(id, "couldn't change brightness.", "brightnessctl",
-            {"-q", "set", QString::number(qRound(level * 100)) + "%"});
+        run(id, "Couldn't change brightness.", "omarchy-brightness-display",
+            {"--no-osd", QString::number(qRound(level * 100)) + "%"});
     else
         run(id, "couldn't change volume.", "sh",
             {"-c",

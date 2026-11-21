@@ -269,8 +269,11 @@ Summary summarize(const Reading &reading, const QString &calmHeadline, const QDa
                 power + QStringLiteral(" Only %1 free.").arg(bytesText(reading.diskFreeBytes)), false};
     if (reading.cpu >= 85)
         return {QStringLiteral("Working hard."), power + QStringLiteral(" The busiest app is below."), false};
-    // Gentle, not a warning: a week without a restart is when updates and
-    // leaks start to pile up.
+    // Gentle, not a warning: a kernel update on Arch removes the running
+    // kernel's modules until restart, and a week without a restart lets leaks
+    // pile up.
+    if (reading.kernelUpdated)
+        return {calmHeadline, power + QStringLiteral(" Kernel updated; restart when you can."), true};
     const int days = int(reading.uptimeSeconds / 86400);
     if (days >= 7)
         return {calmHeadline,

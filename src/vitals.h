@@ -85,6 +85,7 @@ struct Reading {
     double diskFreeBytes = 0;
     double diskTotalBytes = 0;
     double uptimeSeconds = 0;
+    bool kernelUpdated = false;
 };
 
 bool diskNearlyFull(const Reading &reading);

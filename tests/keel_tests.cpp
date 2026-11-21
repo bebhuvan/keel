@@ -319,9 +319,11 @@ class KeelTests : public QObject {
         QCOMPARE(Controls::parseDisplay(both, name), QString("both"));
         const QByteArray mirror = R"([{"name":"eDP-1","disabled":false},{"name":"DP-2","mirrorOf":"eDP-1"}])";
         QCOMPARE(Controls::parseDisplay(mirror, name), QString("mirror"));
-        // Hyprland's stand-in output is not a monitor.
+        // Hyprland's stand-in output is not a monitor; a desktop with no
+        // internal panel hides laptop screen switching.
         QCOMPARE(Controls::parseDisplay(R"([{"name":"FALLBACK","disabled":false}])", name),
-                 QString("laptop"));
+                 QString("desktop"));
+        QCOMPARE(Controls::parseDisplay(R"([{"name":"DP-1","disabled":false}])", name), QString("desktop"));
     }
 
     void wifiNameIsReadFromNmcli() {
@@ -385,6 +387,33 @@ class KeelTests : public QObject {
         QVERIFY(!hyprland::isAddress("0x1\" }) os.execute(\"rm\""));
         QVERIFY(!hyprland::isAddress(""));
         QVERIFY(!hyprland::closeWindow("not an address"));
+    }
+
+    void kernelUpdateGetsAGentleNudge() {
+        Reading reading;
+        reading.kernelUpdated = true;
+        const Summary summary = summarize(reading, "All calm.", QDateTime::currentDateTime());
+        QVERIFY(summary.calm);
+        QCOMPARE(summary.line, QString("On mains power. Kernel updated; restart when you can."));
+    }
+
+    void brightnessIsReadFromOmarchyDisplay() {
+        double level = -1;
+        QVERIFY(Controls::parseBrightness("75\n", level));
+        QCOMPARE(level, 0.75);
+        QVERIFY(Controls::parseBrightness("0", level));
+        QCOMPARE(level, 0.0);
+        QVERIFY(!Controls::parseBrightness("105", level));
+        QVERIFY(!Controls::parseBrightness("error", level));
+    }
+
+    void audioOutputIsReadFromWpctlInspect() {
+        const QByteArray inspect = "  * node.description = \"Meteor Lake-P HD Audio Controller Speaker\"\n"
+                                   "  * node.nick = \"Speaker\"\n";
+        QCOMPARE(Controls::parseAudioOutput(inspect), QString("Speaker"));
+        QCOMPARE(Controls::parseAudioOutput("  * node.description = \"WH-1000XM4\"\n"),
+                 QString("WH-1000XM4"));
+        QVERIFY(Controls::parseAudioOutput("").isEmpty());
     }
 
     void displayChoicesExcludeMirror() {

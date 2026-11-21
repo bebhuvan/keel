@@ -2,9 +2,11 @@ pkgname=keel
 pkgver=0.1.0
 pkgrel=1
 pkgdesc='A calm command center for an Omarchy laptop: stats in plain words, switches, apps and disk space'
+url='https://github.com/bebhuvan/keel'
 arch=('x86_64' 'aarch64')
 license=('MIT')
 depends=('qt6-base' 'qt6-declarative' 'qt6-wayland' 'networkmanager' 'wireplumber' 'brightnessctl' 'power-profiles-daemon' 'polkit' 'inter-font')
+optdepends=('ddcutil: external monitor brightness control')
 makedepends=('gcc' 'make')
 # No separate keel-debug package of debugging symbols; nobody here needs it.
 options=('!debug')
