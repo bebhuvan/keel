@@ -154,7 +154,8 @@ void Backend::sample() {
             {"level", usage.cpu / 100.0},
             {"detail",
              QString("%1% · %2").arg(qRound(usage.cpu)).arg(vitals::bytesText(double(usage.memoryBytes)))},
-            {"canQuit", !usage.windows.isEmpty()}});
+            {"canQuit", !usage.windows.isEmpty() && !usage.essential},
+            {"canEnd", !usage.essential}});
 
     // The details page costs a little more to read, so it is only read while
     // it is showing.
@@ -234,7 +235,8 @@ void Backend::publishProcesses() {
         m_processRows.append(QVariantMap{{"pid", process.pid},
                                          {"name", process.name},
                                          {"cpu", QString("%1%").arg(process.cpu, 0, 'f', 1)},
-                                         {"memory", vitals::bytesText(double(process.memoryBytes))}});
+                                         {"memory", vitals::bytesText(double(process.memoryBytes))},
+                                         {"essential", process.essential}});
 }
 
 void Backend::setSortByMemory(bool byMemory) {

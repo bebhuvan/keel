@@ -32,6 +32,7 @@ struct Usage {
     quint64 memoryBytes = 0;
     QStringList windows; // Hyprland addresses; empty means a background program
     QList<int> pids;
+    bool essential = false; // keeps the desktop running; never offered for ending
 };
 
 // Fills comm, ticks (utime + stime), start time and resident pages from
@@ -55,7 +56,17 @@ struct ProcessUsage {
     QString name;
     double cpu = 0;
     quint64 memoryBytes = 0;
+    bool essential = false;
 };
+
+// Programs the desktop session stands on: ending one logs the user out or
+// breaks sound, the bar or the screen. Keel never ends them, even by force.
+bool isEssential(const QString &comm);
+
+// The key processes are grouped by: the program, except that scripts run
+// by an interpreter (python, node …) are told apart by their own name, so
+// one Python tool is never mistaken for another.
+QString groupKey(const Process &process);
 
 // The busiest processes, or with a filter every process whose name contains
 // it (any case) or whose pid starts with it.

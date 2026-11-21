@@ -237,6 +237,30 @@ class KeelTests : public QObject {
         QVERIFY(!apps::endProcess(int(QCoreApplication::applicationPid()), true));
     }
 
+    void theSessionIsNeverOfferedForEnding() {
+        QVERIFY(apps::isEssential("uwsm"));
+        QVERIFY(apps::isEssential("Hyprland"));
+        QVERIFY(apps::isEssential("systemd-logind"));
+        QVERIFY(apps::isEssential("pipewire"));
+        QVERIFY(!apps::isEssential("chromium"));
+        QVERIFY(!apps::isEssential("python"));
+
+        // uwsm is a Python script: it must not share a group with other
+        // Python tools, or ending "python" would end the session too.
+        QHash<int, apps::Process> procs{{10, {"/usr/bin/python3.14", "uwsm", 0, 50}},
+                                        {11, {"/usr/bin/python3.14", "python", 50, 40}}};
+        QHash<int, apps::Process> before = procs;
+        before[11].ticks = 0;
+        const auto ranked = apps::rank(before, procs, 100, 4096, {}, 3);
+        QCOMPARE(ranked.size(), 2);
+        QCOMPARE(ranked[0].name, QString("python"));
+        QCOMPARE(ranked[0].pids, QList<int>{11});
+        QVERIFY(!ranked[0].essential);
+        QCOMPARE(ranked[1].name, QString("uwsm"));
+        QVERIFY(ranked[1].essential);
+        QVERIFY(apps::topProcesses(procs, procs, 100, 4096, true, 5).first().essential);
+    }
+
     void windowClassesBecomeFriendlyNames() {
         QCOMPARE(apps::friendlyName("com.mitchellh.ghostty"), QString("ghostty"));
         QCOMPARE(apps::friendlyName("vivaldi-stable"), QString("vivaldi"));

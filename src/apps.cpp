@@ -1,10 +1,12 @@
 #include "apps.h"
 
 #include <QCoreApplication>
+#include <QFile>
 #include <QFileInfo>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QRegularExpression>
 #include <QSet>
 #include <algorithm>
 #include <csignal>
@@ -52,6 +54,42 @@ QString friendlyName(const QString &appClass) {
     return name.isEmpty() ? appClass.toLower() : name;
 }
 
+bool isEssential(const QString &comm) {
+    static const QSet<QString> names{"uwsm",
+                                     "Hyprland",
+                                     "Xwayland",
+                                     "dbus-broker",
+                                     "dbus-broker-lau",
+                                     "dbus-daemon",
+                                     "pipewire",
+                                     "pipewire-pulse",
+                                     "wireplumber",
+                                     "quickshell",
+                                     "qs",
+                                     "hypridle",
+                                     "hyprsunset",
+                                     "hyprlock",
+                                     "xdg-desktop-por",
+                                     "gnome-keyring-d",
+                                     "fcitx5",
+                                     "elephant",
+                                     "walker",
+                                     "mako",
+                                     "swayosd-server",
+                                     "polkit-gnome-au",
+                                     "keel",
+                                     "sddm",
+                                     "login"};
+    return names.contains(comm) || comm.startsWith("systemd") || comm.startsWith("uwsm");
+}
+
+QString groupKey(const Process &process) {
+    static const QRegularExpression interpreter(
+        "/(python[0-9.]*|node|bun|deno|perl|ruby|bash|sh|zsh|fish|java|lua[0-9.]*)$");
+    return interpreter.match(process.program).hasMatch() ? process.program + "|" + process.comm
+                                                         : process.program;
+}
+
 QList<Usage> rank(const QHash<int, Process> &before, const QHash<int, Process> &now,
                   quint64 totalTicksElapsed, quint64 pageSize, const QList<Window> &windows, int limit) {
     struct Group {
@@ -60,10 +98,12 @@ QList<Usage> rank(const QHash<int, Process> &before, const QHash<int, Process> &
         QString appClass;
         QStringList windows;
         QList<int> pids;
+        bool essential = false;
     };
     QHash<QString, Group> groups;
     for (auto it = now.begin(); it != now.end(); ++it) {
-        Group &group = groups[it->program];
+        Group &group = groups[groupKey(*it)];
+        group.essential = group.essential || isEssential(it->comm);
         const auto previous = before.constFind(it.key());
         // A process that started since the last sample has no baseline yet.
         if (previous != before.constEnd() && previous->program == it->program && it->ticks >= previous->ticks)
@@ -77,7 +117,7 @@ QList<Usage> rank(const QHash<int, Process> &before, const QHash<int, Process> &
         const auto process = now.constFind(window.pid);
         if (process == now.constEnd())
             continue;
-        Group &group = groups[process->program];
+        Group &group = groups[groupKey(*process)];
         if (group.appClass.isEmpty())
             group.appClass = window.appClass;
         group.windows.append(window.address);
@@ -92,6 +132,7 @@ QList<Usage> rank(const QHash<int, Process> &before, const QHash<int, Process> &
         usage.memoryBytes = it->pages * pageSize;
         usage.windows = it->windows;
         usage.pids = it->pids;
+        usage.essential = it->essential;
         usages.append(usage);
     }
     // A background program can share its name with an app (Claude's window
@@ -134,6 +175,7 @@ QList<ProcessUsage> topProcesses(const QHash<int, Process> &before, const QHash<
             it->ticks >= previous->ticks && totalTicksElapsed)
             row.cpu = qMin(100.0, 100.0 * double(it->ticks - previous->ticks) / double(totalTicksElapsed));
         row.memoryBytes = it->rssPages * pageSize;
+        row.essential = isEssential(it->comm);
         rows.append(row);
     }
     auto byCpu = [](const ProcessUsage &a, const ProcessUsage &b) {
@@ -154,7 +196,12 @@ QList<ProcessUsage> topProcesses(const QHash<int, Process> &before, const QHash<
 bool endProcess(int pid, bool force) {
     if (pid <= 1 || pid == int(QCoreApplication::applicationPid()))
         return false;
-    if (QFileInfo("/proc/" + QString::number(pid)).ownerId() != getuid())
+    const QString base = "/proc/" + QString::number(pid);
+    if (QFileInfo(base).ownerId() != getuid())
+        return false;
+    // Checked here as well as in the window, so no path can end the session.
+    QFile comm(base + "/comm");
+    if (!comm.open(QIODevice::ReadOnly) || isEssential(QString::fromUtf8(comm.readAll().trimmed())))
         return false;
     return kill(pid, force ? SIGKILL : SIGTERM) == 0;
 }

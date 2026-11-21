@@ -111,7 +111,7 @@ Window {
 
     function askToEndProcess(pid) {
         const row = backend.processes.find(r => r.pid === pid)
-        if (!row)
+        if (!row || row.essential)
             return
         win.selectedPid = pid
         win.confirmKind = "process"
@@ -536,7 +536,7 @@ Window {
             Panel {
                 width: parent.width
                 title: "busiest right now"
-                aside: "quit closes politely · end asks first"
+                aside: "quit closes politely · end asks first · system stays"
                 Repeater {
                     model: 3
                     Item {
@@ -571,16 +571,17 @@ Window {
                         Text {
                             id: actionText
                             anchors { right: parent.right; verticalCenter: parent.verticalCenter }
-                            width: 36
+                            width: 52
                             horizontalAlignment: Text.AlignRight
-                            text: app ? (app.canQuit ? "quit" : "end") : ""
-                            color: actionArea.containsMouse ? theme.accent : theme.secondary
+                            text: app ? (app.canQuit ? "quit" : app.canEnd ? "end" : "system") : ""
+                            color: app && !app.canEnd ? theme.muted : actionArea.containsMouse ? theme.accent : theme.secondary
                             font.pixelSize: 12
-                            font.underline: actionArea.containsMouse
+                            font.underline: actionArea.containsMouse && app && app.canEnd
                             MouseArea {
                                 id: actionArea
                                 anchors.fill: parent
                                 anchors.margins: -4
+                                enabled: app !== undefined && app.canEnd
                                 hoverEnabled: true
                                 cursorShape: Qt.PointingHandCursor
                                 onClicked: app.canQuit ? backend.quitApp(index) : win.askToEndApp(index)
@@ -748,7 +749,7 @@ Window {
                 delegate: Rectangle {
                     id: processRow
                     required property int index
-                    readonly property var process: backend.processes[index] || ({ pid: 0, name: "", cpu: "", memory: "" })
+                    readonly property var process: backend.processes[index] || ({ pid: 0, name: "", cpu: "", memory: "", essential: false })
                     readonly property bool selected: process.pid === win.selectedPid
                     width: processList.width
                     height: 22
@@ -781,14 +782,15 @@ Window {
                     Text {
                         anchors { right: parent.right; rightMargin: 10; verticalCenter: parent.verticalCenter }
                         visible: processRow.selected || rowArea.containsMouse
-                        text: "end"
-                        color: endArea.containsMouse ? theme.warn : theme.secondary
+                        text: processRow.process.essential ? "system" : "end"
+                        color: processRow.process.essential ? theme.muted : endArea.containsMouse ? theme.warn : theme.secondary
                         font.pixelSize: 12
-                        font.underline: endArea.containsMouse
+                        font.underline: endArea.containsMouse && !processRow.process.essential
                         MouseArea {
                             id: endArea
                             anchors.fill: parent
                             anchors.margins: -4
+                            enabled: !processRow.process.essential
                             hoverEnabled: true
                             cursorShape: Qt.PointingHandCursor
                             onClicked: win.askToEndProcess(processRow.process.pid)
