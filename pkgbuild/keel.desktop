@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Keel
+Comment=Your laptop at a glance: how it's doing, its switches, its apps and its disk
+Exec=keel
+Icon=keel
+Terminal=false
+Categories=System;Monitor;Utility;
+Keywords=system;monitor;battery;processes;wifi;bluetooth;disk;storage;task manager;
+StartupWMClass=keel

@@ -1,0 +1,22 @@
+#!/bin/sh
+# The one check to run before calling anything done: formatting, QML lint,
+# a warnings-as-errors build, and the tests.
+set -eu
+
+ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
+cd "$ROOT"
+
+echo "== format"
+clang-format --dry-run --Werror src/*.h src/*.cpp tests/*.cpp
+
+echo "== qml lint"
+lint="$(qmllint src/*.qml 2>&1)"
+[ -z "$lint" ] || { echo "$lint"; exit 1; }
+
+echo "== build"
+bin/build
+
+echo "== tests"
+bin/test
+
+echo "verify: all checks passed"
