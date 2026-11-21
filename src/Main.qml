@@ -19,7 +19,6 @@ Window {
     property string page: "overview"
     property bool helpVisible: false
     property bool showHeavy: false
-    property bool cleaning: false
     property bool searching: false
     property int selectedPid: 0
     property int storageIndex: 0
@@ -32,7 +31,7 @@ Window {
     property string confirmName: ""
     readonly property bool asking: confirmKind !== ""
     // Single-letter keys act only when nothing else wants the keyboard.
-    readonly property bool keysFree: !asking && !searching && !helpVisible && !cleaning
+    readonly property bool keysFree: !asking && !searching && !helpVisible
 
     onPageChanged: {
         backend.detailed = page === "details"
@@ -144,12 +143,6 @@ Window {
         win.confirmKind = ""
     }
 
-    function openCleanup() {
-        page = "storage"
-        cleaning = true
-        cleanup.measure()
-    }
-
     function startSearch() {
         page = "details"
         win.searching = true
@@ -167,7 +160,6 @@ Window {
         onActivated: {
             if (win.asking) win.confirmKind = ""
             else if (win.searching || backend.filter !== "") win.stopSearch(false)
-            else if (win.cleaning) win.cleaning = cleanup.busy
             else if (win.helpVisible) win.helpVisible = false
             else Qt.quit()
         } }
@@ -203,8 +195,6 @@ Window {
     Shortcut { sequence: "R"; enabled: win.keysFree && win.page === "storage"; context: Qt.ApplicationShortcut; onActivated: storage.rescan() }
     Shortcut { sequence: "V"; enabled: win.keysFree && win.page === "overview"; context: Qt.ApplicationShortcut; onActivated: win.showHeavy = !win.showHeavy }
     Shortcut { sequence: "P"; enabled: win.keysFree && win.controls.batteryCareAvailable; context: Qt.ApplicationShortcut; onActivated: win.controls.toggleBatteryCare() }
-    Shortcut { sequence: "F"; enabled: win.keysFree && win.page === "storage"; context: Qt.ApplicationShortcut; onActivated: win.openCleanup() }
-    Shortcut { sequences: ["Return", "Enter"]; enabled: win.cleaning && !cleanup.busy; context: Qt.ApplicationShortcut; onActivated: cleanup.clean() }
     Shortcut { sequence: "Y"; enabled: win.asking; context: Qt.ApplicationShortcut; onActivated: win.answer(false) }
     Shortcut { sequence: "F"; enabled: win.asking; context: Qt.ApplicationShortcut; onActivated: win.answer(true) }
 
@@ -895,19 +885,7 @@ Window {
                     width: parent.width
                     height: 34
                     PlainText { anchors.bottom: parent.bottom; text: storage.usedText; color: theme.foreground; font.pixelSize: 24; font.weight: Font.Medium; font.letterSpacing: -0.5 }
-                    Row {
-                        anchors { right: parent.right; bottom: parent.bottom }
-                        spacing: 16
-                        PlainText { anchors.verticalCenter: parent.verticalCenter; text: storage.freeText; color: theme.accent; font.pixelSize: 15 }
-                        Rectangle {
-                            width: freeLabel.implicitWidth + 24
-                            height: 30
-                            radius: Math.min(6, theme.radius)
-                            color: freeArea.containsMouse ? Qt.darker(theme.accent, 1.1) : theme.accent
-                            PlainText { id: freeLabel; anchors.centerIn: parent; text: "free up space  f"; color: theme.onAccent; font.pixelSize: 12 }
-                            MouseArea { id: freeArea; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: win.openCleanup() }
-                        }
-                    }
+                    PlainText { anchors { right: parent.right; bottom: parent.bottom; bottomMargin: 3 } text: storage.freeText; color: theme.accent; font.pixelSize: 15 }
                 }
                 Item { width: 1; height: 12 }
                 Rectangle {
@@ -1186,84 +1164,6 @@ Window {
             }
         }
 
-        // Free up space: everything it would clear, measured, before the click.
-        Rectangle {
-            anchors.fill: parent
-            anchors.margins: 1
-            visible: win.cleaning
-            color: Qt.rgba(0, 0, 0, theme.dark ? 0.55 : 0.25)
-            MouseArea { anchors.fill: parent; onClicked: win.cleaning = cleanup.busy }
-            Rectangle {
-                anchors.centerIn: parent
-                width: 560
-                height: sheet.implicitHeight + 48
-                color: theme.background
-                border.color: theme.accent
-                radius: Math.min(6, theme.radius)
-                MouseArea { anchors.fill: parent }
-                Column {
-                    id: sheet
-                    x: 24; y: 24
-                    width: parent.width - 48
-                    spacing: 10
-                    PlainText { text: "free up space"; color: theme.foreground; font.pixelSize: 18; font.weight: Font.Medium }
-                    PlainText {
-                        width: parent.width
-                        wrapMode: Text.WordWrap
-                        text: cleanup.busy && cleanup.items.length > 0 && cleanup.result === "" ? "working…"
-                              : "only places that are safe to clear. untick anything you'd rather keep."
-                        color: theme.secondary
-                        font.pixelSize: 12
-                    }
-                    Item { width: 1; height: 2 }
-                    Repeater {
-                        model: cleanup.items.length
-                        Item {
-                            required property int index
-                            readonly property var item: cleanup.items[index]
-                            width: sheet.width
-                            height: 36
-                            opacity: item.empty ? 0.5 : 1
-                            PlainText {
-                                id: tick
-                                y: 2
-                                text: item.selected ? "●" : "○"
-                                color: item.selected ? theme.accent : theme.muted
-                                font.pixelSize: 14
-                            }
-                            PlainText { x: 24; y: 0; text: item.label + (item.password ? "  <font color='" + theme.muted + "'>· password</font>" : ""); textFormat: Text.StyledText; color: theme.foreground; font.pixelSize: 13 }
-                            PlainText { x: 24; y: 18; width: parent.width - 150; text: item.note; color: theme.muted; font.pixelSize: 11; elide: Text.ElideRight }
-                            PlainText { anchors.right: parent.right; y: 0; text: item.size; color: item.empty ? theme.muted : theme.accent; font.pixelSize: 13 }
-                            MouseArea { anchors.fill: parent; enabled: !item.empty; cursorShape: Qt.PointingHandCursor; onClicked: cleanup.toggle(index) }
-                        }
-                    }
-                    Item { width: 1; height: 4 }
-                    Item {
-                        width: parent.width
-                        height: 32
-                        PlainText {
-                            anchors.verticalCenter: parent.verticalCenter
-                            width: parent.width - cleanButton.width - 16
-                            wrapMode: Text.WordWrap
-                            text: cleanup.result !== "" ? cleanup.result : cleanup.busy ? "measuring…" : "esc to close"
-                            color: cleanup.result !== "" ? theme.good : theme.muted
-                            font.pixelSize: 12
-                        }
-                        Rectangle {
-                            id: cleanButton
-                            anchors.right: parent.right
-                            width: cleanText.implicitWidth + 28
-                            height: 32
-                            radius: Math.min(6, theme.radius)
-                            color: cleanup.busy ? theme.line : cleanArea.containsMouse ? Qt.darker(theme.accent, 1.1) : theme.accent
-                            PlainText { id: cleanText; anchors.centerIn: parent; text: cleanup.busy ? "…" : "clean " + cleanup.total + "  ⏎"; color: cleanup.busy ? theme.muted : theme.onAccent; font.pixelSize: 12 }
-                            MouseArea { id: cleanArea; anchors.fill: parent; enabled: !cleanup.busy; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: cleanup.clean() }
-                        }
-                    }
-                }
-            }
-        }
-
         Rectangle {
             anchors.fill: parent
             anchors.margins: 1
@@ -1287,7 +1187,7 @@ Window {
                         ["x  del", "end the picked process"],
                         ["c", "sort processes by cpu"],
                         ["enter  ⌫", "into a folder · back out (storage)"],
-                        ["o  r  f", "open in files · rescan · free up space (storage)"],
+                        ["o  r", "open in files · rescan (storage)"],
                         ["v", "busiest now / heaviest since opened"],
                         ["p", "battery care: stop charging at 80%"],
                         ["t", "light / dark for now"],

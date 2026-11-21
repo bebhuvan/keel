@@ -16,8 +16,7 @@ HEADERS += \
     src/backend.h \
     src/theme.h \
     src/hyprland.h \
-    src/storage.h \
-    src/cleanup.h
+    src/storage.h
 
 SOURCES += \
     src/main.cpp \
@@ -27,7 +26,6 @@ SOURCES += \
     src/backend.cpp \
     src/theme.cpp \
     src/hyprland.cpp \
-    src/storage.cpp \
-    src/cleanup.cpp
+    src/storage.cpp
 
 RESOURCES += src/resources.qrc

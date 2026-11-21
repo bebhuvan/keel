@@ -147,3 +147,15 @@ now fixed and tested:
   one group. Session programs are refused everywhere, scripts are grouped by name, and the
   question says how many processes it will end.
 - Releases are built with makepkg's hardening flags; CI and a secrets scan run `bin/verify`.
+
+## 19. Free up space removed (supersedes 14, narrows 15)
+
+Built, then taken out the same day. On this laptop the safe items freed about 100 MB of 36 GB
+free; the only large item, developer caches, just gets downloaded again; and the real space (one
+445 GB folder) needs a person's judgment, which no button can make. Meanwhile it was the only
+feature that deleted files, and it needed an admin helper and password prompt for old packages and
+logs. Keel now shows where the space went (biggest folders, what grew, big untouched files) and
+opens the folder; deciding what to delete stays with the user in their file manager. The helper
+from decision 15 now does battery care only. Git history (commit 69991e7) keeps the removed code
+if it's ever wanted back. Rejected: keeping only "empty the trash", since even that is a delete
+path to secure for a folder that's usually near empty.

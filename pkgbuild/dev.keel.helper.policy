@@ -4,8 +4,8 @@
 <policyconfig>
   <vendor>Keel</vendor>
   <action id="dev.keel.helper">
-    <description>Change system settings from Keel</description>
-    <message>Keel needs your password to remove old packages and logs, or to change the battery charge limit.</message>
+    <description>Change the battery charge limit</description>
+    <message>Keel needs your password to change the battery charge limit.</message>
     <defaults>
       <allow_any>no</allow_any>
       <allow_inactive>no</allow_inactive>

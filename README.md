@@ -19,8 +19,8 @@ It has three pages; **Tab** moves between them.
   CPU or memory, press `/` to find one by name, `x` to end it (it asks, and offers force).
 - **Storage.** Disk used and free, the usual space hogs (trash, app caches, downloads, the package
   cache), what grew since the last scan, big files untouched for six months, and the biggest
-  folders in your home folder (Enter goes into one, Backspace comes back out). **Free up space**
-  (`f`) shows everything safe to clear, measured, and clears what you leave ticked in one go.
+  folders in your home folder (Enter goes into one, Backspace comes back out). Keel shows where
+  the space went; deciding what to delete stays with you, in your file manager (`o` opens it).
 
 Programs your desktop runs on (uwsm, Hyprland, PipeWire, the Omarchy shell and the like) are marked
 "system" and can't be ended from Keel, even by force.
@@ -46,7 +46,6 @@ It runs only while its window is open; press Esc and it's gone.
 | `Enter` / `Backspace` | into a folder / back out (storage) |
 | `o` | open the picked folder in the file manager |
 | `r` | rescan the disk |
-| `f` | free up space (storage) |
 | `v` | busiest now / heaviest since opened |
 | `p` | battery care on / off (asks for your password) |
 | `t` | light / dark until Keel closes |
@@ -66,10 +65,9 @@ bin/install        # builds an Arch package and installs it, so Keel shows up in
 `bin/install` asks for your password (it runs `makepkg -si`). It packages what's in the folder, so
 commit first. To remove Keel: `sudo pacman -R keel`.
 
-Two features need the installed package, not `build/keel`: battery care and the system half of
-free up space (old package versions, old logs). Those run through `/usr/lib/keel/keel-helper`, a
-short script that accepts only those steps. The system's own password prompt asks for them, and
-says what they are for.
+Battery care needs the installed package, not `build/keel`. It runs through
+`/usr/lib/keel/keel-helper`, a short script that accepts only `battery-care on|off`, and the
+system's own password prompt asks for it and says what it's for.
 
 ## Check it
 
@@ -77,9 +75,8 @@ says what they are for.
 bin/verify         # formatting, QML lint, a warnings-as-errors build, and the tests
 ```
 
-The tests use temporary folders and never change the machine: deleting is tested in throwaway
-folders, the only process a test ends is a `sleep` it started itself, and the admin helper is only
-fed arguments it must refuse. Flipping real switches is never exercised by them. `bin/verify` also
+The tests use temporary folders and never change the machine: the only process a test ends is a
+`sleep` it started itself, and the admin helper is only fed arguments it must refuse. Flipping real switches is never exercised by them. `bin/verify` also
 runs gitleaks when it's installed, and `.github/workflows/verify.yml` runs it all on every push
 once the project has a GitHub remote.
 
@@ -91,8 +88,7 @@ once the project has a GitHub remote.
   Omarchy command its own menus use (`omarchy-bluetooth-power`, `omarchy-toggle-idle`,
   `omarchy-hyprland-monitor-internal` …), so Keel and the desktop always agree.
 - `src/storage.*` is the disk scanner and the storage page's state.
-- `src/cleanup.*` is free up space; `pkgbuild/keel-helper` and `dev.keel.helper.policy` are its
-  password-protected half.
+- `pkgbuild/keel-helper` and `dev.keel.helper.policy` are battery care's password-protected half.
 - `src/backend.*` reads the machine every two seconds and hands the window ready-made text.
 - `src/theme.*` follows the Omarchy theme. `src/hyprland.*` talks to Hyprland's socket directly.
 - `src/Main.qml` is the window; `Meter`, `Graph`, `Panel` and `PlainText` are its small parts.

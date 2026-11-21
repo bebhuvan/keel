@@ -7,7 +7,6 @@
 #include <unistd.h>
 
 #include "apps.h"
-#include "cleanup.h"
 #include "controls.h"
 #include "hyprland.h"
 #include "storage.h"
@@ -469,54 +468,6 @@ class KeelTests : public QObject {
         storage::scan(dir.path(), 2, 0, progress);
         QCOMPARE(progress.stale.size(), 1);
         QCOMPARE(progress.stale.first().path, QString("old/archive.bin"));
-    }
-
-    void cleanupReadsWhatTheToolsReport() {
-        QCOMPARE(cleanup::parsePaccache("==> finished dry run: 3 candidates (disk space saved: 5.71 MiB)\n"),
-                 quint64(5.71 * 1048576));
-        QCOMPARE(cleanup::parsePaccache("==> no candidate packages found for pruning\n"), quint64(0));
-        QCOMPARE(
-            cleanup::parseJournalUsage("Archived and active journals take up 95.8M in the file system.\n"),
-            quint64(95.8 * 1048576));
-        QCOMPARE(cleanup::parseJournalUsage("Archived and active journals take up 1.2G in the file system."),
-                 quint64(1.2 * 1073741824));
-    }
-
-    void cleanupEmptiesOnlyInsideAndRefusesLinks() {
-        QTemporaryDir home, elsewhere;
-        QDir(home.path()).mkpath("cache/sub");
-        writeBytes(home.path() + "/cache/a", 10);
-        writeBytes(home.path() + "/cache/sub/b", 10);
-        writeBytes(elsewhere.path() + "/precious", 10);
-        // A link inside is removed as a link; what it points to survives.
-        QVERIFY(QFile::link(elsewhere.path(), home.path() + "/cache/link"));
-        QVERIFY(cleanup::emptyFolder(home.path(), "cache"));
-        QVERIFY(QDir(home.path() + "/cache").exists());
-        QVERIFY(QDir(home.path() + "/cache")
-                    .isEmpty(QDir::AllEntries | QDir::NoDotAndDotDot | QDir::Hidden | QDir::System));
-        QVERIFY(QFile::exists(elsewhere.path() + "/precious"));
-        // A folder that is itself a link is refused outright…
-        QVERIFY(QFile::link(elsewhere.path(), home.path() + "/trap"));
-        QVERIFY(!cleanup::emptyFolder(home.path(), "trap"));
-        // …and so is one reached through a linked parent, the trash case.
-        QDir(elsewhere.path()).mkpath("files");
-        writeBytes(elsewhere.path() + "/files/also-precious", 10);
-        QDir(home.path()).mkpath(".local/share");
-        QVERIFY(QFile::link(elsewhere.path(), home.path() + "/.local/share/Trash"));
-        QVERIFY(!cleanup::emptyFolder(home.path(), ".local/share/Trash/files"));
-        QVERIFY(QFile::exists(elsewhere.path() + "/files/also-precious"));
-        QVERIFY(QFile::exists(elsewhere.path() + "/precious"));
-        QVERIFY(!cleanup::emptyFolder(home.path(), "../escape"));
-        QVERIFY(cleanup::emptyFolder(home.path(), "missing"));
-    }
-
-    void cleanupNeverTouchesOutsideItsList() {
-        for (const char *id : {"trash", "thumbnails", "aur", "dev"})
-            for (const QString &folder : Cleanup::folders(id)) {
-                QVERIFY(!folder.startsWith('/'));
-                QVERIFY(!folder.contains(".."));
-            }
-        QVERIFY(Cleanup::folders("anything else").isEmpty());
     }
 
     void heaviestSinceOpenedRanksByLifetime() {
