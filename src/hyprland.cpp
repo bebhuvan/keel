@@ -25,7 +25,7 @@ QByteArray request(const QByteArray &command) {
 }
 
 bool isAddress(const QString &address) {
-    static const QRegularExpression valid("^0x[0-9a-fA-F]{1,16}$");
+    static const QRegularExpression valid("^0x[0-9a-fA-F]{1,16}\\z");
     return valid.match(address).hasMatch();
 }
 

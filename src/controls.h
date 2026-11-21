@@ -53,7 +53,7 @@ class Controls : public QObject {
     // "both", "monitor" (laptop screen off), "mirror", or "laptop" when no
     // external monitor is connected. `name` gets the monitor's model name.
     static QString parseDisplay(const QByteArray &monitorsJson, QString &name);
-    static QStringList displayChoices() { return {"both", "monitor", "mirror"}; }
+    static QStringList displayChoices() { return {"both", "monitor"}; }
 
     QVariantMap states() const;
     QString mode() const { return matchMode(m_states); }
@@ -97,6 +97,10 @@ class Controls : public QObject {
     void run(const QString &id, const QString &failure, const QString &program, const QStringList &arguments);
     void query(const QString &name, const QString &program, const QStringList &arguments,
                const std::function<void(const QByteArray &)> &onReply);
+    void queryPowerSaver();
+    void queryDevices();
+    void runDisplayStep(const QString &target, bool fromMirror);
+    void checkDisplaySettled();
     void update(const QString &id, bool on);
     void applyLevel(const QString &id);
     void fail(const QString &message);
@@ -107,6 +111,14 @@ class Controls : public QObject {
     QSet<QString> m_pending;
     QHash<QString, QProcess *> m_queries;
     QHash<QString, double> m_wantedLevels; // set while a level change waits its turn
+    bool m_nightKnown = false;
+    bool m_powerQueryPending = false;
+    bool m_devicesQueryPending = false;
+    QString m_displayTarget;
+    bool m_displayNeedStep2 = false;
+    int m_displayAttempts = 0;
+    QTimer m_displaySettle;
+    QTimer m_slowDebounce;
     QString m_error;
     QString m_network;
     double m_brightness = -1;

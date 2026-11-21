@@ -40,6 +40,10 @@ struct StaleFile {
 struct Progress {
     std::atomic<quint64> files{0};
     std::atomic<bool> cancel{false};
+    // Guards QMetaObject::invokeMethod on Storage against concurrent
+    // destruction when the worker thread is detached on exit.
+    std::mutex aliveLock;
+    bool alive = true;
     // When staleMin is set, files at least that big and last changed before
     // staleBefore are collected here.
     quint64 staleMin = 0;
@@ -129,7 +133,8 @@ class Storage : public QObject {
 
   private:
     void startScan(const QStringList &trail);
-    void finished(const QStringList &trail, storage::Node node, QList<storage::StaleFile> stale);
+    void finished(const QStringList &trail, storage::Node node, QList<storage::StaleFile> stale,
+                  qint64 packageCacheBytes);
     // Opens a folder under the home folder; anything else is refused.
     void revealInside(const QString &relative) const;
     void buildSpots();
@@ -141,13 +146,13 @@ class Storage : public QObject {
     QString m_cacheFile;
     storage::Node m_root;
     bool m_loaded = false;
-    QStringList m_trail; // folder names from the home folder down
-    QStringList m_scanTrail;
+    QStringList m_trail;    // folder names from the home folder down
     qint64 m_scannedAt = 0; // ms since epoch
     bool m_compressed = false;
     QHash<QString, quint64> m_previous; // folder sizes from the scan before
     qint64 m_previousAt = 0;
     QList<storage::StaleFile> m_stale;
+    qint64 m_packageCacheBytes = -1;
     QVariantList m_spots;
     std::unique_ptr<std::thread> m_worker;
     std::shared_ptr<storage::Progress> m_progress;

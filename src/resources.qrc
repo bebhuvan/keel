@@ -1,9 +1,13 @@
 <RCC>
     <qresource prefix="/">
         <file alias="Main.qml">Main.qml</file>
-        <file alias="Meter.qml">Meter.qml</file>
-        <file alias="Graph.qml">Graph.qml</file>
-        <file alias="Panel.qml">Panel.qml</file>
         <file alias="PlainText.qml">PlainText.qml</file>
+        <file alias="Figure.qml">Figure.qml</file>
+        <file alias="Section.qml">Section.qml</file>
+        <file alias="Lamp.qml">Lamp.qml</file>
+        <file alias="Gauge.qml">Gauge.qml</file>
+        <file alias="Fader.qml">Fader.qml</file>
+        <file alias="Trace.qml">Trace.qml</file>
+        <file alias="Scroller.qml">Scroller.qml</file>
     </qresource>
 </RCC>

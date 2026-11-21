@@ -6,7 +6,7 @@ Numbered and append-only. Each says what was decided, why, and what was turned d
 
 C++ and Qt Quick, built with qmake into one binary and installed as an Arch package, the way Hype,
 Omacut and Monologue are built. Qt is already on every Omarchy machine, so Keel adds no
-dependencies. Rejected: an Electron or web app (hundreds of MB of memory for a status window), and a
+libraries (its one extra package is a typeface; see 21). Rejected: an Electron or web app (hundreds of MB of memory for a status window), and a
 terminal UI (the point was something friendlier than btop).
 
 ## 2. No Qt Quick Controls, Material or other styles
@@ -148,7 +148,7 @@ now fixed and tested:
   question says how many processes it will end.
 - Releases are built with makepkg's hardening flags; CI and a secrets scan run `bin/verify`.
 
-## 19. Free up space removed (supersedes 14, narrows 15)
+## 19. Free up space removed (supersedes 10 and 14, narrows 15)
 
 Built, then taken out the same day. On this laptop the safe items freed about 100 MB of 36 GB
 free; the only large item, developer caches, just gets downloaded again; and the real space (one
@@ -159,3 +159,41 @@ opens the folder; deciding what to delete stays with the user in their file mana
 from decision 15 now does battery care only. Git history (commit 69991e7) keeps the removed code
 if it's ever wanted back. Rejected: keeping only "empty the trash", since even that is a delete
 path to secure for a folder that's usually near empty.
+
+## 20. Screen switching hardened; mirror removed
+
+After a real Hyprland 0.56.2 crash in `CMonitor::changeWorkspace` caused by overlapping Lua
+reloads and a collision with a local `omarchy-display-guard` service, screen switching now offers
+only **both screens** and **monitor only** (no mirror), runs one reload at a time and waits for
+Hyprland's `j/monitors all` to settle before unlocking, and delegates to `~/.local/bin/omarchy-display-guard --toggle`
+when that service is present so preference flags never fight. The `e` shortcut is scoped to Overview.
+
+## 21. A plain, exact look: one grid, rules not boxes, one typeface, one warm colour
+
+The first design read as generic: everything in a code font at nearly one size, the theme accent on
+every meter and button, segmented block meters, solid bar graphs with no scale, and three column
+grids that didn't line up. The overview also didn't fit a tiled window, hiding the busiest apps.
+
+Now, after Braun instruments, Swiss print and Apple's own apps:
+
+- **One grid.** Every page is a stack of `Section` rows: a hairline, a label in a 120 px left column,
+  content to its right. Pages scroll when the window is short.
+- **Rules, not boxes.** No filled panels or cards; thin lines separate sections and rows.
+- **One typeface, Inter**, with Inter Display for the large headline and figures, and tabular
+  figures everywhere so numbers line up. It comes from Arch's `inter-font` package (OFL, maintained
+  by the distribution) rather than a copy in the repo; without it Qt falls back to the system sans.
+  Rejected: staying in JetBrains Mono (monospace prose is what made it feel like a terminal), and
+  bundling the font files (a binary blob to keep current, when Arch already does).
+- **Colour means something.** White or near-black surfaces, three greys for text, and one orange
+  (`theme.warn`) used only for what needs looking at: a warning headline, a gauge over its limit, an
+  app using half the processor, a full disk. On means a filled ink lamp, not colour. The Omarchy
+  accent marks the picked row and the mark. The green "good" colour is gone.
+- **Instrument parts, not widgets.** Gauges with tick marks, indicator lamps, faders with a cap,
+  and line traces with a dot on the latest value, all hand-drawn because decision 2 still holds.
+- **Sentence case and proper units.** Keel's words are now written "All calm." and "21.3 GB", in
+  the C++ that produces them, not patched in the window. Names from outside (networks, monitors,
+  devices) are shown as they are, no longer lowercased.
+
+Rejected along the way: a standard dashboard of metric cards and sparklines (generic), and three
+concept designs (prose with clickable words, a waterline with depth soundings, a seismograph strip)
+that were clever before they were clear.

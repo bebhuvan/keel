@@ -100,8 +100,8 @@ class KeelTests : public QObject {
         QCOMPARE(heatWord(-1), QString("—"));
         QCOMPARE(durationText(220), QString("3h 40m"));
         QCOMPARE(durationText(45), QString("45m"));
-        QCOMPARE(bytesText(1536 * 1024), QString("1.5 mb"));
-        QCOMPARE(rateText(-5), QString("0 b/s"));
+        QCOMPARE(bytesText(1536 * 1024), QString("1.5 MB"));
+        QCOMPARE(rateText(-5), QString("0 B/s"));
     }
 
     void headlineIsCalmWhenNothingNeedsTheUser() {
@@ -120,7 +120,7 @@ class KeelTests : public QObject {
         const Summary summary = summarize(reading, "heads down.", now);
         QVERIFY(summary.calm);
         QCOMPARE(summary.headline, QString("heads down."));
-        QCOMPARE(summary.line, QString("battery lasts until 19:00. nothing needs you."));
+        QCOMPARE(summary.line, QString("Battery lasts until 19:00. Nothing needs you."));
     }
 
     void aLongUptimeGetsAGentleNudge() {
@@ -128,7 +128,7 @@ class KeelTests : public QObject {
         reading.uptimeSeconds = 9 * 86400 + 5;
         const Summary summary = summarize(reading, "all calm.", QDateTime::currentDateTime());
         QVERIFY(summary.calm);
-        QCOMPARE(summary.line, QString("on mains power. up 9 days; a restart would freshen things."));
+        QCOMPARE(summary.line, QString("On mains power. Up 9 days; a restart would freshen things."));
     }
 
     void headlineNamesTheMostUrgentProblem() {
@@ -143,16 +143,16 @@ class KeelTests : public QObject {
         reading.diskTotalBytes = 500e9;
         const QDateTime now = QDateTime::currentDateTime();
         // Low battery beats heat, memory, disk and load, in that order.
-        QCOMPARE(summarize(reading, "all calm.", now).headline, QString("battery low."));
-        QCOMPARE(summarize(reading, "all calm.", now).line, QString("8% left. plug in soon."));
+        QCOMPARE(summarize(reading, "all calm.", now).headline, QString("Battery low."));
+        QCOMPARE(summarize(reading, "all calm.", now).line, QString("8% left. Plug in soon."));
         reading.battery.status = "Charging";
-        QCOMPARE(summarize(reading, "all calm.", now).headline, QString("running hot."));
+        QCOMPARE(summarize(reading, "all calm.", now).headline, QString("Running hot."));
         reading.celsius = 50;
-        QCOMPARE(summarize(reading, "all calm.", now).headline, QString("memory nearly full."));
+        QCOMPARE(summarize(reading, "all calm.", now).headline, QString("Memory nearly full."));
         reading.memory.availableKb = 80;
-        QCOMPARE(summarize(reading, "all calm.", now).headline, QString("disk nearly full."));
+        QCOMPARE(summarize(reading, "all calm.", now).headline, QString("Disk nearly full."));
         reading.diskFreeBytes = 100e9;
-        QCOMPARE(summarize(reading, "all calm.", now).headline, QString("working hard."));
+        QCOMPARE(summarize(reading, "all calm.", now).headline, QString("Working hard."));
     }
 
     void diskWarnsOnlyWhenTrulyLow() {
@@ -314,7 +314,7 @@ class KeelTests : public QObject {
                 {"name":"HDMI-A-1","disabled":false,"mirrorOf":"none",
                  "description":"Acer Technologies VG271U M3 2326176234207"}])";
         QCOMPARE(Controls::parseDisplay(monitorOnly, name), QString("monitor"));
-        QCOMPARE(name, QString("acer vg271u m3"));
+        QCOMPARE(name, QString("Acer VG271U M3"));
         const QByteArray both = R"([{"name":"eDP-1","disabled":false},{"name":"DP-2","disabled":false}])";
         QCOMPARE(Controls::parseDisplay(both, name), QString("both"));
         const QByteArray mirror = R"([{"name":"eDP-1","disabled":false},{"name":"DP-2","mirrorOf":"eDP-1"}])";
@@ -343,11 +343,52 @@ class KeelTests : public QObject {
         QVERIFY(!Controls::parseVolume("error", volume, muted));
     }
 
+    void batteryChargingRespectsCareCap() {
+        Battery battery;
+        battery.present = true;
+        battery.status = "Charging";
+        battery.percent = 60;
+        battery.energyNow = 24e6;
+        battery.energyFull = 40e6;
+        battery.powerNow = 8e6; // 8 W: 16 Wh to 100% (120m), 8 Wh to 80% (60m)
+        QCOMPARE(minutesLeft(battery, 100), 120);
+        QCOMPARE(minutesLeft(battery, 80), 60);
+
+        Reading reading;
+        reading.battery = battery;
+        reading.chargeCapPercent = 80;
+        const QDateTime now(QDate(2026, 11, 21), QTime(16, 0));
+        QCOMPARE(summarize(reading, "all calm.", now).line,
+                 QString("Charging to 80% by 17:00. Nothing needs you."));
+    }
+
+    void deletedExecutablesStillSplitInterpretersAndReusedPidsDoNotInflateCpu() {
+        QHash<int, apps::Process> before{{10, {"/usr/bin/python3.14 (deleted)", "uwsm", 100, 10, 1000}},
+                                         {11, {"/usr/bin/python3.14 (deleted)", "worker", 100, 10, 1001}}};
+        QHash<int, apps::Process> now = before;
+        now[11].ticks = 150;
+        // Same PID and program, different start time -> reused PID, must not charge delta.
+        now[10].start = 2000;
+        now[10].ticks = 190;
+        const auto ranked = apps::rank(before, now, 100, 4096, {}, 5);
+        QCOMPARE(ranked.size(), 2);
+        QCOMPARE(ranked[0].name, QString("worker"));
+        QCOMPARE(ranked[0].cpu, 50.0);
+        QCOMPARE(ranked[1].name, QString("uwsm"));
+        QCOMPARE(ranked[1].cpu, 0.0);
+        QVERIFY(ranked[1].essential);
+    }
+
     void onlyHyprlandAddressesReachTheLuaCommand() {
         QVERIFY(hyprland::isAddress("0x557024b7b040"));
+        QVERIFY(!hyprland::isAddress("0x1\n"));
         QVERIFY(!hyprland::isAddress("0x1\" }) os.execute(\"rm\""));
         QVERIFY(!hyprland::isAddress(""));
         QVERIFY(!hyprland::closeWindow("not an address"));
+    }
+
+    void displayChoicesExcludeMirror() {
+        QCOMPARE(Controls::displayChoices(), QStringList({"both", "monitor"}));
     }
 
     void storageScanSizesFoldersAndKeepsOnlyBigOnes() {
@@ -417,12 +458,12 @@ class KeelTests : public QObject {
             first.open(); // nothing saved yet, so it scans
             QTRY_VERIFY(!first.scanning());
             QVERIFY(QFile::exists(saved));
-            QCOMPARE(first.spots().first().toMap().value("label").toString(), QString("trash"));
+            QCOMPARE(first.spots().first().toMap().value("label").toString(), QString("Trash"));
         }
         Storage second(home.path(), saved);
         second.open();
         QVERIFY(!second.scanning()); // loaded, not scanned
-        QVERIFY(second.status().startsWith("scanned"));
+        QVERIFY(second.status().startsWith("Scanned"));
     }
 
     void growthNamesWhereTheSpaceWent() {
@@ -482,7 +523,7 @@ class KeelTests : public QObject {
 
     void deviceBatteriesReadNicely() {
         QCOMPARE(Controls::formatDevices({{"WH-1000XM4", 80}, {"MX Master 3", 55}}),
-                 QString("wh-1000xm4 80%  ·  mx master 3 55%"));
+                 QString("WH-1000XM4 80%  ·  MX Master 3 55%"));
         QVERIFY(Controls::formatDevices({}).isEmpty());
     }
 
@@ -522,7 +563,7 @@ class KeelTests : public QObject {
         Theme theme(dir.path(), nullptr, false);
         QCOMPARE(theme.accent(), QString("#2f6bed"));
         QVERIFY(theme.dark());
-        QCOMPARE(theme.background(), QString("#111113"));
+        QCOMPARE(theme.background(), QString("#0f0f10"));
     }
 
     void themeReadsAccentAndLightMode() {
@@ -543,10 +584,46 @@ class KeelTests : public QObject {
         QVERIFY(theme.dark());
     }
 
+    void storageFromJsonDropsTraversalNames() {
+        const QJsonObject bad{{"n", "home"},
+                              {"b", 100.0},
+                              {"d", true},
+                              {"c", QJsonArray{QJsonObject{{"n", "../../etc"}, {"b", 50.0}, {"d", true}},
+                                               QJsonObject{{"n", "a/b"}, {"b", 20.0}, {"d", true}},
+                                               QJsonObject{{"n", "Docs"}, {"b", 30.0}, {"d", true}}}}};
+        const storage::Node node = storage::fromJson(bad);
+        QCOMPARE(node.children.size(), 1);
+        QCOMPARE(node.children.first().name, QString("Docs"));
+    }
+
+    void storageDestructionMidScanIsSafe() {
+        QTemporaryDir home, cache;
+        for (int i = 0; i < 40; ++i) {
+            QDir(home.path()).mkpath(QString("d%1").arg(i));
+            writeBytes(home.path() + QString("/d%1/f.bin").arg(i), 4096);
+        }
+        {
+            Storage s(home.path(), cache.path() + "/s.json");
+            s.rescan();
+        }
+        QTest::qWait(50);
+    }
+
     void themeIgnoresAnInvalidAccent() {
         QCOMPARE(Theme::readKey("accent = \"#123456\"\n", "accent"), QString("#123456"));
         QCOMPARE(Theme::readKey("mode = 'dark'\n", "mode"), QString("dark"));
         QVERIFY(Theme::readKey("other = \"x\"\n", "accent").isEmpty());
+
+        QTemporaryDir dir;
+        QDir(dir.path()).mkpath("theme");
+        for (const QByteArray &bad : QList<QByteArray>{"red", "#zzz", "rgb(1,2,3)", "' onclick='x"}) {
+            QFile colors(dir.path() + "/theme/colors.toml");
+            QVERIFY(colors.open(QIODevice::WriteOnly | QIODevice::Truncate));
+            colors.write("accent = \"" + bad + "\"\n");
+            colors.close();
+            Theme theme(dir.path(), nullptr, false);
+            QCOMPARE(theme.accent(), QString("#2f6bed"));
+        }
     }
 
   private:

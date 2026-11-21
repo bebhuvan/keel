@@ -7,11 +7,11 @@ too much.
 
 It has three pages; **Tab** moves between them.
 
-- **Overview.** One headline ("all calm.", "running hot.", "disk nearly full."), how long the
-  battery lasts as a clock time, four meters (battery, workload, memory, heat), four modes
+- **Overview.** One headline ("All calm.", "Running hot.", "Disk nearly full."), how long the
+  battery lasts as a clock time, the battery level, three gauges (processor, memory, heat), four modes
   (everyday, focus, travel, night) that set several switches at once, six switches (Wi-Fi,
   Bluetooth, do not disturb, night light, battery saver, stay awake), brightness and volume,
-  screens (both, monitor only, mirror), battery care (stop charging at 80%), the batteries of
+  screens (both, monitor only), battery care (stop charging at 80%), the batteries of
   connected Bluetooth devices, and the three busiest apps with quit or end. Press `v` to see
   instead which apps have used the most processor time since they opened: the battery hogs.
 - **Details.** Processor history and each core, memory and swap, disk space and activity, network
@@ -26,6 +26,8 @@ Programs your desktop runs on (uwsm, Hyprland, PipeWire, the Omarchy shell and t
 "system" and can't be ended from Keel, even by force.
 
 Keel follows your Omarchy theme: its accent colour, its light or dark mode, and its window corners.
+It's drawn plainly on purpose: white or near-black, thin rules instead of boxes, one typeface
+(Inter), and orange only for something that needs looking at, such as heat or a full disk.
 It runs only while its window is open; press Esc and it's gone.
 
 ## Keys
@@ -35,7 +37,7 @@ It runs only while its window is open; press Esc and it's gone.
 | `Tab` | overview → details → storage |
 | `1` `2` `3` `4` | everyday · focus · travel · night |
 | `w` `b` `d` `n` `s` `a` | Wi-Fi · Bluetooth · do not disturb · night light · battery saver · stay awake |
-| `e` | screens: both · monitor only · mirror |
+| `e` | screens: both · monitor only |
 | `,` `.` | brightness down / up |
 | `-` `=` | volume down / up |
 | `m` | mute (overview) · sort by memory (details) |
@@ -54,7 +56,8 @@ It runs only while its window is open; press Esc and it's gone.
 
 ## Run it
 
-You need Omarchy (or Arch with Hyprland) and the Qt 6 build tools, which Omarchy already includes.
+You need Omarchy (or Arch with Hyprland) and the Qt 6 build tools, which Omarchy already includes,
+plus the Inter typeface (`sudo pacman -S inter-font`; `bin/install` pulls it in by itself).
 
 ```sh
 bin/build          # compiles to build/keel
@@ -91,7 +94,10 @@ once the project has a GitHub remote.
 - `pkgbuild/keel-helper` and `dev.keel.helper.policy` are battery care's password-protected half.
 - `src/backend.*` reads the machine every two seconds and hands the window ready-made text.
 - `src/theme.*` follows the Omarchy theme. `src/hyprland.*` talks to Hyprland's socket directly.
-- `src/Main.qml` is the window; `Meter`, `Graph`, `Panel` and `PlainText` are its small parts.
+- `src/Main.qml` is the window. Its small parts: `Section` (one row of the page grid), `Lamp` (an
+  on/off indicator and label), `Gauge` (a level with tick marks), `Fader` (a slider), `Trace` (a
+  two-minute line chart), `Figure` (a large number with its unit), `Scroller` (a page that scrolls
+  when the window is short) and `PlainText`.
 
 Why things are the way they are is in [DECISIONS.md](DECISIONS.md).
 

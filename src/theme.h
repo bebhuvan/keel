@@ -14,7 +14,6 @@ class Theme : public QObject {
     Q_PROPERTY(bool dark READ dark NOTIFY changed)
     Q_PROPERTY(QString accent READ accent NOTIFY changed)
     Q_PROPERTY(QString onAccent READ onAccent NOTIFY changed)
-    Q_PROPERTY(QString good READ good NOTIFY changed)
     Q_PROPERTY(QString warn READ warn NOTIFY changed)
     Q_PROPERTY(QString background READ background NOTIFY changed)
     Q_PROPERTY(QString bar READ bar NOTIFY changed)
@@ -32,14 +31,17 @@ class Theme : public QObject {
     bool dark() const { return m_override ? !m_themeDark : m_themeDark; }
     QString accent() const { return m_accent; }
     QString onAccent() const;
-    QString good() const { return dark() ? "#4ade80" : "#16a34a"; }
-    QString warn() const { return dark() ? "#f87171" : "#dc2626"; }
-    QString background() const { return dark() ? "#111113" : "#ffffff"; }
-    QString bar() const { return dark() ? "#18181b" : "#f5f6f8"; }
-    QString foreground() const { return dark() ? "#e4e4e7" : "#14161b"; }
-    QString secondary() const { return dark() ? "#a1a1aa" : "#4b5059"; }
-    QString muted() const { return dark() ? "#71717a" : "#8b909a"; }
-    QString line() const { return dark() ? "#27272a" : "#e4e6ea"; }
+    // One warm colour, only for what needs looking at (heat, a full disk, a
+    // hungry app). Everything else is ink on white or near-black.
+    QString warn() const { return dark() ? "#ff7a2e" : "#e2540a"; }
+    QString background() const { return dark() ? "#0f0f10" : "#ffffff"; }
+    // The faint fill behind a hovered or picked row.
+    QString bar() const { return dark() ? "#1b1b1c" : "#f4f4f4"; }
+    QString foreground() const { return dark() ? "#ededed" : "#111111"; }
+    QString secondary() const { return dark() ? "#9c9c9c" : "#666666"; }
+    // Ticks, empty lamps and placeholders, never words that must be read.
+    QString muted() const { return dark() ? "#5a5a5a" : "#a6a6a6"; }
+    QString line() const { return dark() ? "#262627" : "#e6e6e6"; }
     int radius() const { return m_radius; }
 
     // Flips light and dark for this run only; the Omarchy theme is untouched.

@@ -81,7 +81,7 @@ Counters parseNetDev(const QByteArray &netDev) {
 }
 
 QString bytesText(double bytes) {
-    static const char *units[] = {"b", "kb", "mb", "gb", "tb"};
+    static const char *units[] = {"B", "KB", "MB", "GB", "TB"};
     int unit = 0;
     while (bytes >= 1000 && unit < 4)
         bytes /= 1024, ++unit;
@@ -161,20 +161,25 @@ Battery parseBattery(const QByteArray &uevent) {
         battery.energyFull = chargeFull * voltage;
         battery.energyFullDesign = chargeFullDesign * voltage;
         battery.powerNow = current >= 0 ? current * voltage : 0;
+    } else if (battery.powerNow <= 0 && current > 0 && voltage > 0) {
+        battery.powerNow = current * voltage;
     }
     return battery;
 }
 
 bool onBattery(const Battery &battery) { return battery.present && battery.status == "Discharging"; }
 
-int minutesLeft(const Battery &battery) {
+int minutesLeft(const Battery &battery, int chargeCapPercent) {
     if (!battery.present || battery.powerNow < 1)
         return -1;
     double hours = -1;
-    if (battery.status == "Discharging")
+    if (battery.status == "Discharging") {
         hours = battery.energyNow / battery.powerNow;
-    else if (battery.status == "Charging" && battery.energyFull > battery.energyNow)
-        hours = (battery.energyFull - battery.energyNow) / battery.powerNow;
+    } else if (battery.status == "Charging") {
+        const double target = battery.energyFull * (double(qBound(1, chargeCapPercent, 100)) / 100.0);
+        if (target > battery.energyNow)
+            hours = (target - battery.energyNow) / battery.powerNow;
+    }
     // A momentary spike or idle dip can give absurd estimates; past two days
     // the number means nothing, so say nothing.
     if (hours < 0 || hours > 48)
@@ -222,18 +227,22 @@ QString heatWord(double celsius) {
     return QStringLiteral("very hot");
 }
 
-static QString batteryLine(const Battery &battery, const QDateTime &now) {
+static QString batteryLine(const Battery &battery, int chargeCapPercent, const QDateTime &now) {
     if (!battery.present)
-        return QStringLiteral("on mains power.");
-    const int minutes = minutesLeft(battery);
+        return QStringLiteral("On mains power.");
+    const int minutes = minutesLeft(battery, chargeCapPercent);
     const QString clock = minutes >= 0 ? now.addSecs(qint64(minutes) * 60).toString("HH:mm") : QString();
     if (battery.status == "Discharging")
-        return minutes >= 0 ? QStringLiteral("battery lasts until %1.").arg(clock)
-                            : QStringLiteral("on battery, %1% left.").arg(battery.percent);
-    if (battery.status == "Charging")
-        return minutes >= 0 ? QStringLiteral("charging, full by %1.").arg(clock)
-                            : QStringLiteral("charging, %1% so far.").arg(battery.percent);
-    return QStringLiteral("plugged in, %1% charged.").arg(battery.percent);
+        return minutes >= 0 ? QStringLiteral("Battery lasts until %1.").arg(clock)
+                            : QStringLiteral("On battery, %1% left.").arg(battery.percent);
+    if (battery.status == "Charging") {
+        if (minutes >= 0)
+            return chargeCapPercent < 100
+                       ? QStringLiteral("Charging to %1% by %2.").arg(chargeCapPercent).arg(clock)
+                       : QStringLiteral("Charging, full by %1.").arg(clock);
+        return QStringLiteral("Charging, %1% so far.").arg(battery.percent);
+    }
+    return QStringLiteral("Plugged in, %1% charged.").arg(battery.percent);
 }
 
 bool diskNearlyFull(const Reading &reading) {
@@ -243,30 +252,30 @@ bool diskNearlyFull(const Reading &reading) {
 
 Summary summarize(const Reading &reading, const QString &calmHeadline, const QDateTime &now) {
     const Battery &battery = reading.battery;
-    const QString power = batteryLine(battery, now);
+    const QString power = batteryLine(battery, reading.chargeCapPercent, now);
     if (onBattery(battery) && battery.percent <= 10) {
         const int minutes = minutesLeft(battery);
-        const QString left = minutes >= 0 ? QStringLiteral("about %1 left.").arg(durationText(minutes))
+        const QString left = minutes >= 0 ? QStringLiteral("About %1 left.").arg(durationText(minutes))
                                           : QStringLiteral("%1% left.").arg(battery.percent);
-        return {QStringLiteral("battery low."), left + QStringLiteral(" plug in soon."), false};
+        return {QStringLiteral("Battery low."), left + QStringLiteral(" Plug in soon."), false};
     }
     if (reading.celsius >= 88)
-        return {QStringLiteral("running hot."), power + QStringLiteral(" the busiest app is below."), false};
+        return {QStringLiteral("Running hot."), power + QStringLiteral(" The busiest app is below."), false};
     if (reading.memory.usedFraction() >= 0.9)
-        return {QStringLiteral("memory nearly full."),
-                power + QStringLiteral(" quitting an app below frees some."), false};
+        return {QStringLiteral("Memory nearly full."),
+                power + QStringLiteral(" Quitting an app below frees some."), false};
     if (diskNearlyFull(reading))
-        return {QStringLiteral("disk nearly full."),
-                power + QStringLiteral(" only %1 free.").arg(bytesText(reading.diskFreeBytes)), false};
+        return {QStringLiteral("Disk nearly full."),
+                power + QStringLiteral(" Only %1 free.").arg(bytesText(reading.diskFreeBytes)), false};
     if (reading.cpu >= 85)
-        return {QStringLiteral("working hard."), power + QStringLiteral(" the busiest app is below."), false};
+        return {QStringLiteral("Working hard."), power + QStringLiteral(" The busiest app is below."), false};
     // Gentle, not a warning: a week without a restart is when updates and
     // leaks start to pile up.
     const int days = int(reading.uptimeSeconds / 86400);
     if (days >= 7)
         return {calmHeadline,
-                power + QStringLiteral(" up %1 days; a restart would freshen things.").arg(days), true};
-    return {calmHeadline, power + QStringLiteral(" nothing needs you."), true};
+                power + QStringLiteral(" Up %1 days; a restart would freshen things.").arg(days), true};
+    return {calmHeadline, power + QStringLiteral(" Nothing needs you."), true};
 }
 
 } // namespace vitals

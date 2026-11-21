@@ -2,11 +2,14 @@
 
 #include "hyprland.h"
 
-#include <QDBusInterface>
-#include <QDBusMetaType>
+#include <QDBusConnection>
+#include <QDBusMessage>
 #include <QDBusObjectPath>
-#include <QDBusReply>
+#include <QDBusPendingCallWatcher>
+#include <QDBusPendingReply>
+#include <QDBusVariant>
 #include <QDir>
+#include <QElapsedTimer>
 #include <QFile>
 #include <QFileInfo>
 #include <QJsonArray>
@@ -14,6 +17,7 @@
 #include <QJsonObject>
 #include <QProcess>
 #include <QRegularExpression>
+#include <memory>
 
 namespace {
 
@@ -32,10 +36,10 @@ bool radioOn(const QByteArray &type) {
     return false;
 }
 
-bool powerSaverOn() {
-    QDBusInterface profiles("net.hadess.PowerProfiles", "/net/hadess/PowerProfiles",
-                            "net.hadess.PowerProfiles", QDBusConnection::systemBus());
-    return profiles.property("ActiveProfile").toString() == "power-saver";
+QString displayGuardPath() {
+    const QString path = QDir::homePath() + "/.local/bin/omarchy-display-guard";
+    const QFileInfo info(path);
+    return info.isFile() && info.isExecutable() ? path : QString();
 }
 
 const QString helperPath = "/usr/lib/keel/keel-helper";
@@ -74,16 +78,31 @@ Controls::Controls(const QString &stateDirectory, const QString &backlightDirect
         m_error.clear();
         emit changed();
     });
+    m_displaySettle.setInterval(250);
+    connect(&m_displaySettle, &QTimer::timeout, this, &Controls::checkDisplaySettled);
+    m_slowDebounce.setSingleShot(true);
+    m_slowDebounce.setInterval(150);
+    connect(&m_slowDebounce, &QTimer::timeout, this, &Controls::refreshSlow);
 }
 
 Controls::~Controls() {
+    m_displaySettle.stop();
+    m_slowDebounce.stop();
+    QElapsedTimer budget;
+    budget.start();
     for (QProcess *process : findChildren<QProcess *>()) {
         if (process->state() == QProcess::NotRunning)
             continue;
-        if (m_queries.values().contains(process))
-            process->kill(), process->waitForFinished(500);
-        else
-            process->waitForFinished(8000);
+        if (m_queries.values().contains(process) || process->program() == "pkexec") {
+            process->kill();
+            process->waitForFinished(100);
+        } else {
+            const int left = int(qMax<qint64>(50, 1000 - budget.elapsed()));
+            if (!process->waitForFinished(left)) {
+                process->terminate();
+                process->waitForFinished(100);
+            }
+        }
     }
 }
 
@@ -163,13 +182,13 @@ QString Controls::parseDisplay(const QByteArray &monitorsJson, QString &name) {
         } else if (on) {
             externalOn = true;
             if (name.isEmpty()) {
-                // "Acer Technologies VG271U M3 2326176234207" → "acer vg271u m3".
+                // "Acer Technologies VG271U M3 2326176234207" → "Acer VG271U M3".
                 QStringList words = monitor.value("description").toString().split(' ', Qt::SkipEmptyParts);
                 if (words.size() > 1 && words.last().size() >= 8)
                     words.removeLast(); // the serial number
                 if (words.size() > 2 && words[1].startsWith("Technolog"))
                     words.removeAt(1);
-                name = words.join(' ').toLower();
+                name = words.join(' ');
                 if (name.isEmpty())
                     name = output;
             }
@@ -185,7 +204,7 @@ QString Controls::parseDisplay(const QByteArray &monitorsJson, QString &name) {
 QString Controls::formatDevices(const QList<QPair<QString, int>> &devices) {
     QStringList parts;
     for (const auto &device : devices)
-        parts.append(QString("%1 %2%").arg(device.first.toLower()).arg(device.second));
+        parts.append(QString("%1 %2%").arg(device.first).arg(device.second));
     return parts.join("  ·  ");
 }
 
@@ -266,39 +285,100 @@ void Controls::refresh() {
     }
 }
 
+void Controls::queryPowerSaver() {
+    if (m_powerQueryPending)
+        return;
+    m_powerQueryPending = true;
+    QDBusMessage msg = QDBusMessage::createMethodCall("net.hadess.PowerProfiles", "/net/hadess/PowerProfiles",
+                                                      "org.freedesktop.DBus.Properties", "Get");
+    msg << QString("net.hadess.PowerProfiles") << QString("ActiveProfile");
+    auto *watcher = new QDBusPendingCallWatcher(QDBusConnection::systemBus().asyncCall(msg, 2000), this);
+    connect(watcher, &QDBusPendingCallWatcher::finished, this, [this](QDBusPendingCallWatcher *w) {
+        m_powerQueryPending = false;
+        const QDBusPendingReply<QDBusVariant> reply = *w;
+        if (reply.isValid())
+            update("saver", reply.value().variant().toString() == "power-saver");
+        w->deleteLater();
+    });
+}
+
+void Controls::queryDevices() {
+    if (m_devicesQueryPending)
+        return;
+    m_devicesQueryPending = true;
+    QDBusMessage msg = QDBusMessage::createMethodCall("org.freedesktop.UPower", "/org/freedesktop/UPower",
+                                                      "org.freedesktop.UPower", "EnumerateDevices");
+    auto *watcher = new QDBusPendingCallWatcher(QDBusConnection::systemBus().asyncCall(msg, 2000), this);
+    connect(watcher, &QDBusPendingCallWatcher::finished, this, [this](QDBusPendingCallWatcher *w) {
+        const QDBusPendingReply<QList<QDBusObjectPath>> reply = *w;
+        w->deleteLater();
+        if (!reply.isValid()) {
+            m_devicesQueryPending = false;
+            return;
+        }
+        QStringList targets;
+        for (const QDBusObjectPath &path : reply.value()) {
+            const QString name = path.path().section('/', -1);
+            if (!name.startsWith("battery_BAT") && !name.startsWith("line_power") && name != "DisplayDevice")
+                targets.append(path.path());
+        }
+        if (targets.isEmpty()) {
+            m_devicesQueryPending = false;
+            if (!m_devices.isEmpty()) {
+                m_devices.clear();
+                emit changed();
+            }
+            return;
+        }
+        struct Batch {
+            int remaining = 0;
+            QList<QPair<QString, int>> devices;
+        };
+        auto batch = std::make_shared<Batch>();
+        batch->remaining = int(targets.size());
+        for (const QString &objectPath : targets) {
+            QDBusMessage props = QDBusMessage::createMethodCall("org.freedesktop.UPower", objectPath,
+                                                                "org.freedesktop.DBus.Properties", "GetAll");
+            props << QString("org.freedesktop.UPower.Device");
+            auto *pw = new QDBusPendingCallWatcher(QDBusConnection::systemBus().asyncCall(props, 2000), this);
+            connect(pw, &QDBusPendingCallWatcher::finished, this,
+                    [this, batch](QDBusPendingCallWatcher *devWatcher) {
+                        const QDBusPendingReply<QVariantMap> devReply = *devWatcher;
+                        devWatcher->deleteLater();
+                        if (devReply.isValid()) {
+                            const QVariantMap map = devReply.value();
+                            const QString model = map.value("Model").toString().trimmed();
+                            const int percent = qRound(map.value("Percentage").toDouble());
+                            if (!model.isEmpty() && percent > 0)
+                                batch->devices.append({model, percent});
+                        }
+                        if (--batch->remaining == 0) {
+                            m_devicesQueryPending = false;
+                            const QString formatted = formatDevices(batch->devices);
+                            if (formatted != m_devices) {
+                                m_devices = formatted;
+                                emit changed();
+                            }
+                        }
+                    });
+        }
+    });
+}
+
 void Controls::refreshSlow() {
     if (!m_batteryDirectory.isEmpty() && !m_pending.contains("care")) {
-        const bool care = readFile(m_batteryDirectory + "/charge_control_end_threshold").toInt() <= 90;
-        if (care != m_batteryCare) {
-            m_batteryCare = care;
-            emit changed();
+        bool ok = false;
+        const int limit = readFile(m_batteryDirectory + "/charge_control_end_threshold").toInt(&ok);
+        if (ok && limit > 0) {
+            const bool care = limit <= 90;
+            if (care != m_batteryCare) {
+                m_batteryCare = care;
+                emit changed();
+            }
         }
     }
-    // Headphones, mice and keyboards report their batteries through UPower.
-    QDBusInterface upower("org.freedesktop.UPower", "/org/freedesktop/UPower", "org.freedesktop.UPower",
-                          QDBusConnection::systemBus());
-    const QDBusReply<QList<QDBusObjectPath>> paths = upower.call("EnumerateDevices");
-    QList<QPair<QString, int>> devices;
-    if (paths.isValid())
-        for (const QDBusObjectPath &path : paths.value()) {
-            const QString name = path.path().section('/', -1);
-            if (name.startsWith("battery_BAT") || name.startsWith("line_power") || name == "DisplayDevice")
-                continue;
-            QDBusInterface device("org.freedesktop.UPower", path.path(), "org.freedesktop.UPower.Device",
-                                  QDBusConnection::systemBus());
-            const QString model = device.property("Model").toString().trimmed();
-            const int percent = qRound(device.property("Percentage").toDouble());
-            if (!model.isEmpty() && percent > 0)
-                devices.append({model, percent});
-        }
-    const QString formatted = formatDevices(devices);
-    if (formatted != m_devices) {
-        m_devices = formatted;
-        emit changed();
-    }
-
-    // A D-Bus round trip and a Hyprland request: cheap, but not free.
-    update("saver", powerSaverOn());
+    queryDevices();
+    queryPowerSaver();
     if (!m_pending.contains("display")) {
         QString name;
         const QString display = parseDisplay(hyprland::request("j/monitors all"), name);
@@ -311,6 +391,7 @@ void Controls::refreshSlow() {
     query("dnd", "omarchy-shell", {"notifications", "isDnd"},
           [this](const QByteArray &reply) { update("dnd", reply.trimmed() == "on"); });
     query("night", "omarchy-toggle-nightlight", {"--status"}, [this](const QByteArray &reply) {
+        m_nightKnown = true;
         update("night", QJsonDocument::fromJson(reply).object().value("enabled").toBool());
     });
     query("network", "nmcli", {"-t", "-f", "TYPE,STATE,CONNECTION", "device"},
@@ -340,9 +421,14 @@ void Controls::toggle(const QString &id) {
 
 void Controls::applyMode(const QString &mode) {
     const QHash<QString, bool> wanted = modeStates(mode);
-    for (const QString &id : ids())
+    for (const QString &id : ids()) {
+        // Night light only supports toggling, so never flip it until its
+        // current state has been read at least once.
+        if (id == "night" && !m_nightKnown)
+            continue;
         if (wanted.contains(id) && wanted.value(id) != m_states.value(id))
             set(id, wanted.value(id));
+    }
 }
 
 void Controls::set(const QString &id, bool on) {
@@ -355,7 +441,7 @@ void Controls::set(const QString &id, bool on) {
     emit changed();
 
     const QString state = on ? "on" : "off";
-    const QString failure = QString("couldn't turn %1 %2. try again in a moment.").arg(label(id), state);
+    const QString failure = QString("Couldn't turn %1 %2. Try again in a moment.").arg(label(id), state);
     if (id == "wifi")
         run(id, failure, "nmcli", {"radio", "wifi", state});
     else if (id == "bluetooth")
@@ -390,24 +476,62 @@ void Controls::setVolume(double level) {
     applyLevel("volume");
 }
 
-// Through Omarchy's own monitor commands, which also remember the choice
-// across reloads and bring the laptop screen back if the monitor is
-// unplugged. Only fixed strings reach the shell.
+// Through Omarchy's own monitor commands, one reload at a time, waiting for
+// Hyprland's output list to settle before allowing another switch. Never
+// chains two reloads back to back.
 void Controls::setDisplay(const QString &choice) {
     if (m_display == "laptop")
         return fail("no external monitor is connected.");
     if (!displayChoices().contains(choice) || m_pending.contains("display") || choice == m_display)
         return;
-    QString script;
-    if (choice == "both")
-        script = "omarchy-hyprland-monitor-internal-mirror off && omarchy-hyprland-monitor-internal on";
-    else if (choice == "monitor")
-        script = "omarchy-hyprland-monitor-internal-mirror off && omarchy-hyprland-monitor-internal off";
-    else
-        script = "omarchy-hyprland-monitor-internal-mirror on";
+    const bool fromMirror = m_display == "mirror";
+    m_displayTarget = choice;
+    m_displayNeedStep2 = fromMirror && choice == "monitor";
+    m_displayAttempts = 0;
     m_display = choice;
     emit changed();
-    run("display", "couldn't switch screens. try again in a moment.", "sh", {"-c", script});
+    runDisplayStep(choice, fromMirror);
+}
+
+void Controls::runDisplayStep(const QString &target, bool fromMirror) {
+    if (fromMirror) {
+        run("display", "couldn't switch screens. try again in a moment.",
+            "omarchy-hyprland-monitor-internal-mirror", {"off"});
+        return;
+    }
+    // If a custom display guard is present on this laptop, let it flip the
+    // internal display so its preference flag stays in step with Omarchy's.
+    const QString guard = displayGuardPath();
+    if (!guard.isEmpty()) {
+        run("display", "couldn't switch screens. try again in a moment.", guard, {"--toggle"});
+        return;
+    }
+    run("display", "couldn't switch screens. try again in a moment.", "omarchy-hyprland-monitor-internal",
+        {target == "both" ? "on" : "off"});
+}
+
+void Controls::checkDisplaySettled() {
+    QString name;
+    const QString actual = parseDisplay(hyprland::request("j/monitors all"), name);
+    const QString wanted = m_displayNeedStep2 ? QString("both") : m_displayTarget;
+    const bool arrived = actual == wanted;
+    if (!arrived && ++m_displayAttempts < 16)
+        return;
+    m_displaySettle.stop();
+    if (m_displayNeedStep2 && arrived) {
+        m_displayNeedStep2 = false;
+        m_displayAttempts = 0;
+        runDisplayStep(m_displayTarget, false);
+        return;
+    }
+    m_displayNeedStep2 = false;
+    m_displayTarget.clear();
+    m_pending.remove("display");
+    if (actual != m_display || name != m_monitor) {
+        m_display = actual;
+        m_monitor = name;
+    }
+    emit changed();
 }
 
 void Controls::cycleDisplay() {
@@ -417,6 +541,8 @@ void Controls::cycleDisplay() {
 }
 
 void Controls::toggleMute() {
+    if (m_pending.contains("mute"))
+        return;
     m_muted = !m_muted;
     emit changed();
     run("mute", "couldn't change mute. try again in a moment.", "wpctl",
@@ -445,15 +571,31 @@ void Controls::run(const QString &id, const QString &failure, const QString &pro
     m_pending.insert(id);
     auto *process = new QProcess(this);
     auto finish = [this, process, id, failure](bool ok) {
+        process->deleteLater();
+        if (id == "display") {
+            if (!ok) {
+                m_displayNeedStep2 = false;
+                m_displayTarget.clear();
+                m_pending.remove(id);
+                fail(failure);
+                m_slowDebounce.start();
+                emit changed();
+            } else {
+                // Keep "display" locked until Hyprland finishes reloading and
+                // reports the new layout (or times out).
+                m_displayAttempts = 0;
+                m_displaySettle.start();
+            }
+            return;
+        }
         if (!ok)
             fail(failure);
         m_pending.remove(id);
-        process->deleteLater();
         if (id == "brightness" || id == "volume")
             applyLevel(id);
         refresh();
         if (id != "brightness" && id != "volume")
-            refreshSlow();
+            m_slowDebounce.start();
         emit changed();
     };
     connect(process, &QProcess::finished, this, [finish](int code, QProcess::ExitStatus status) {

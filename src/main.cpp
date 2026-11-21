@@ -16,7 +16,7 @@
 int main(int argc, char *argv[]) {
     // Speed and memory, measured: the GTK platform theme costs about 250 ms
     // and 40 MB at start, and the input-method module another 50 ms. Keel
-    // has no text fields and no file dialogs, so it needs neither.
+    // has no file dialogs and only one plain ASCII process-search field.
     qputenv("QT_QPA_PLATFORMTHEME", "");
     qunsetenv("QT_IM_MODULE");
     // A flat window of text and rectangles draws as fast in software, and
@@ -31,7 +31,9 @@ int main(int argc, char *argv[]) {
     // and the launcher pick up the installed icon.
     app.setDesktopFileName("keel");
     app.setWindowIcon(QIcon::fromTheme("keel"));
-    app.setFont(QFont("JetBrainsMono Nerd Font", 10));
+    // Inter, from the inter-font package; Qt falls back to the system sans
+    // if it is missing.
+    app.setFont(QFont("Inter", 10));
 
     Theme theme;
     Backend backend;

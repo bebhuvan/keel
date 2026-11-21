@@ -9,12 +9,14 @@
 #include <QRegularExpression>
 #include <QSet>
 #include <algorithm>
+#include <cerrno>
 #include <csignal>
 #include <cstdio>
 #include <cstdlib>
 #include <dirent.h>
 #include <fcntl.h>
 #include <sys/stat.h>
+#include <sys/syscall.h>
 #include <unistd.h>
 
 namespace apps {
@@ -84,8 +86,10 @@ bool isEssential(const QString &comm) {
 QString groupKey(const Process &process) {
     static const QRegularExpression interpreter(
         "/(python[0-9.]*|node|bun|deno|perl|ruby|bash|sh|zsh|fish|java|lua[0-9.]*)$");
-    return interpreter.match(process.program).hasMatch() ? process.program + "|" + process.comm
-                                                         : process.program;
+    QString program = process.program;
+    if (program.endsWith(QLatin1String(" (deleted)")))
+        program.chop(10);
+    return interpreter.match(program).hasMatch() ? program + "|" + process.comm : program;
 }
 
 QList<Usage> rank(const QHash<int, Process> &before, const QHash<int, Process> &now,
@@ -106,7 +110,8 @@ QList<Usage> rank(const QHash<int, Process> &before, const QHash<int, Process> &
         group.essential = group.essential || isEssential(it->comm);
         const auto previous = before.constFind(it.key());
         // A process that started since the last sample has no baseline yet.
-        if (previous != before.constEnd() && previous->program == it->program && it->ticks >= previous->ticks)
+        if (previous != before.constEnd() && previous->start == it->start &&
+            previous->program == it->program && it->ticks >= previous->ticks)
             group.ticks += it->ticks - previous->ticks;
         group.pages += it->rssPages;
         group.lifetime += it->ticks;
@@ -178,8 +183,8 @@ QList<ProcessUsage> topProcesses(const QHash<int, Process> &before, const QHash<
         row.start = it->start;
         row.name = it->comm;
         const auto previous = before.constFind(it.key());
-        if (previous != before.constEnd() && previous->program == it->program &&
-            it->ticks >= previous->ticks && totalTicksElapsed)
+        if (previous != before.constEnd() && previous->start == it->start &&
+            previous->program == it->program && it->ticks >= previous->ticks && totalTicksElapsed)
             row.cpu = qMin(100.0, 100.0 * double(it->ticks - previous->ticks) / double(totalTicksElapsed));
         row.memoryBytes = it->rssPages * pageSize;
         row.essential = isEssential(it->comm);
@@ -203,17 +208,37 @@ QList<ProcessUsage> topProcesses(const QHash<int, Process> &before, const QHash<
 bool endProcess(int pid, quint64 start, bool force) {
     if (pid <= 1 || pid == int(QCoreApplication::applicationPid()))
         return false;
-    const QString base = "/proc/" + QString::number(pid);
-    if (QFileInfo(base).ownerId() != getuid())
+    const int sig = force ? SIGKILL : SIGTERM;
+    // Pin the process with a pidfd before checking /proc so the PID cannot be
+    // reused between verification and signaling.
+    const int pidfd = int(syscall(SYS_pidfd_open, pid, 0));
+    const bool havePidfd = pidfd >= 0;
+    if (!havePidfd && errno != ENOSYS)
         return false;
+    auto closePidfd = [&] {
+        if (havePidfd)
+            close(pidfd);
+    };
+    const QString base = "/proc/" + QString::number(pid);
+    if (QFileInfo(base).ownerId() != getuid()) {
+        closePidfd();
+        return false;
+    }
     QFile stat(base + "/stat");
     Process now;
-    if (!stat.open(QIODevice::ReadOnly) || !parseStat(stat.readAll(), now) || now.start != start)
+    if (!stat.open(QIODevice::ReadOnly) || !parseStat(stat.readAll(), now) || now.start != start) {
+        closePidfd();
         return false; // Gone, or the pid now belongs to another process.
+    }
     // Checked here as well as in the window, so no path can end the session.
-    if (isEssential(now.comm))
+    if (isEssential(now.comm)) {
+        closePidfd();
         return false;
-    return kill(pid, force ? SIGKILL : SIGTERM) == 0;
+    }
+    const bool ok =
+        havePidfd ? syscall(SYS_pidfd_send_signal, pidfd, sig, nullptr, 0) == 0 : kill(pid, sig) == 0;
+    closePidfd();
+    return ok;
 }
 
 // Plain system calls rather than QDir and QFile: this runs every two seconds
@@ -262,6 +287,8 @@ QHash<int, Process> readProcesses(const QHash<int, Process> &known) {
             if (length <= 0)
                 continue;
             process.program = QString::fromLocal8Bit(target, int(length));
+            if (process.program.endsWith(QLatin1String(" (deleted)")))
+                process.program.chop(10);
         }
         processes.insert(pid, process);
     }

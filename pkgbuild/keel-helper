@@ -16,36 +16,51 @@ usage() {
 [ "$1" = battery-care ] || usage
 case "$2" in on | off) ;; *) usage ;; esac
 
-battery=""
-for dir in /sys/class/power_supply/BAT*; do
-  if [ -e "$dir/charge_control_end_threshold" ]; then
-    battery=$dir
-    break
-  fi
-done
-if [ -z "$battery" ]; then
-  echo "keel-helper: no battery with a charge limit" >&2
-  exit 1
-fi
-name=$(basename "$battery")
-case "$name" in BAT[0-9] | BAT[0-9][0-9]) ;; *) exit 1 ;; esac
+found=0
 rule=/etc/udev/rules.d/99-battery-charge-threshold.rules
+tmp="$rule.tmp.$$"
 
 if [ "$2" = on ]; then
-  # The rule makes the limit survive restarts.
-  printf 'SUBSYSTEM=="power_supply", KERNEL=="%s", ATTR{charge_control_end_threshold}="80", ATTR{charge_control_start_threshold}="75"\n' "$name" >"$rule"
-  rm -f "$rule.disabled"
-  # Start before end: the kernel keeps start below end at every step.
-  if [ -e "$battery/charge_control_start_threshold" ]; then
-    echo 75 >"$battery/charge_control_start_threshold"
+  : >"$tmp"
+  for dir in /sys/class/power_supply/BAT*; do
+    [ -e "$dir/charge_control_end_threshold" ] || continue
+    name=$(basename "$dir")
+    case "$name" in BAT[0-9] | BAT[0-9][0-9]) ;; *) continue ;; esac
+    found=1
+    if [ -e "$dir/charge_control_start_threshold" ]; then
+      printf 'SUBSYSTEM=="power_supply", KERNEL=="%s", ATTR{charge_control_end_threshold}="80", ATTR{charge_control_start_threshold}="75"\n' "$name" >>"$tmp"
+      # Raise end first in case a lower limit (<= 75) is currently active,
+      # then set start below end, then lower end to 80.
+      echo 100 >"$dir/charge_control_end_threshold"
+      echo 75 >"$dir/charge_control_start_threshold"
+    else
+      printf 'SUBSYSTEM=="power_supply", KERNEL=="%s", ATTR{charge_control_end_threshold}="80"\n' "$name" >>"$tmp"
+    fi
+    echo 80 >"$dir/charge_control_end_threshold"
+  done
+  if [ "$found" -eq 0 ]; then
+    rm -f "$tmp"
+    echo "keel-helper: no battery with a charge limit" >&2
+    exit 1
   fi
-  echo 80 >"$battery/charge_control_end_threshold"
+  mv -f "$tmp" "$rule"
+  rm -f "$rule.disabled"
 else
+  for dir in /sys/class/power_supply/BAT*; do
+    [ -e "$dir/charge_control_end_threshold" ] || continue
+    name=$(basename "$dir")
+    case "$name" in BAT[0-9] | BAT[0-9][0-9]) ;; *) continue ;; esac
+    found=1
+    echo 100 >"$dir/charge_control_end_threshold"
+    if [ -e "$dir/charge_control_start_threshold" ]; then
+      echo 0 >"$dir/charge_control_start_threshold"
+    fi
+  done
+  if [ "$found" -eq 0 ]; then
+    echo "keel-helper: no battery with a charge limit" >&2
+    exit 1
+  fi
   if [ -e "$rule" ]; then
     mv -f "$rule" "$rule.disabled"
-  fi
-  echo 100 >"$battery/charge_control_end_threshold"
-  if [ -e "$battery/charge_control_start_threshold" ]; then
-    echo 0 >"$battery/charge_control_start_threshold"
   fi
 fi

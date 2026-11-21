@@ -65,9 +65,9 @@ double cpuPercent(const CpuTimes &before, const CpuTimes &after);
 Memory parseMeminfo(const QByteArray &meminfo);
 Battery parseBattery(const QByteArray &uevent);
 
-// Minutes until empty while discharging, or until full while charging, or -1
-// when the battery does not report a usable power draw.
-int minutesLeft(const Battery &battery);
+// Minutes until empty while discharging, or until chargeCapPercent (default
+// 100) while charging, or -1 when the battery does not report a usable draw.
+int minutesLeft(const Battery &battery, int chargeCapPercent = 100);
 bool onBattery(const Battery &battery);
 
 QString durationText(int minutes);
@@ -78,6 +78,7 @@ QString heatWord(double celsius);
 // Everything the headline weighs, read at one moment.
 struct Reading {
     Battery battery;
+    int chargeCapPercent = 100;
     double cpu = 0; // percent
     Memory memory;
     double celsius = -1;

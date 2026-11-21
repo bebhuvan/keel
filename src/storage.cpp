@@ -19,11 +19,11 @@
 #include <dirent.h>
 #include <fcntl.h>
 #include <mutex>
-#include <set>
 #include <sys/resource.h>
 #include <sys/stat.h>
 #include <sys/statvfs.h>
 #include <unistd.h>
+#include <unordered_set>
 
 namespace storage {
 
@@ -45,6 +45,22 @@ constexpr int splitDepth = 5;
 // only a script makes) would exhaust handles or the stack. Below this depth
 // folders are counted but not entered.
 constexpr int maxDepth = 512;
+
+// Cap queued open directory descriptors so a very wide tree can never exhaust
+// RLIMIT_NOFILE and silently drop folders or starve the rest of Keel.
+constexpr std::size_t maxQueuedTasks = 256;
+
+struct LinkKey {
+    dev_t dev;
+    ino_t ino;
+    bool operator==(const LinkKey &other) const { return dev == other.dev && ino == other.ino; }
+};
+
+struct LinkKeyHash {
+    std::size_t operator()(const LinkKey &k) const noexcept {
+        return std::hash<dev_t>{}(k.dev) ^ (std::hash<ino_t>{}(k.ino) * 0x9e3779b97f4a7c15ull);
+    }
+};
 
 // A folder near the top while the scan runs. Its subfolders that became
 // tasks are kept apart from what was walked inline, and summed at the end.
@@ -69,6 +85,8 @@ struct Shared {
     QHash<QString, QSet<QByteArray>> mountsIn;
 
     bool isMount(const QString &where, const char *name) const {
+        if (mountsIn.isEmpty())
+            return false;
         const auto it = mountsIn.constFind(where);
         return it != mountsIn.constEnd() && it->contains(QByteArray(name));
     }
@@ -81,7 +99,7 @@ struct Shared {
     // A file with several hard links is the same space however many names
     // it has, so it is counted at the first name met.
     std::mutex linksLock;
-    std::set<std::pair<dev_t, ino_t>> links;
+    std::unordered_set<LinkKey, LinkKeyHash> links;
 
     // Notes a big, long-unchanged file. The path is only built for these.
     void maybeStale(const struct stat &info, quint64 size, const QString &where, const char *name) {
@@ -176,17 +194,23 @@ void runTask(Folder &folder, int fd, Shared &shared) {
         const int child = openat(handle, entry->d_name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
         if (child < 0)
             continue;
+        bool queued = false;
         if (folder.depth + 1 <= splitDepth) {
-            auto sub = std::make_unique<Folder>();
-            sub->name = QString::fromLocal8Bit(entry->d_name);
-            sub->depth = folder.depth + 1;
-            sub->path = folder.path.isEmpty() ? sub->name : folder.path + "/" + sub->name;
-            Folder *task = sub.get();
-            folder.folders.push_back(std::move(sub));
-            std::lock_guard guard(shared.lock);
-            shared.queue.emplace_back(task, child);
-            shared.wake.notify_one();
-        } else {
+            std::unique_lock guard(shared.lock);
+            if (shared.queue.size() < maxQueuedTasks) {
+                auto sub = std::make_unique<Folder>();
+                sub->name = QString::fromLocal8Bit(entry->d_name);
+                sub->depth = folder.depth + 1;
+                sub->path = folder.path.isEmpty() ? sub->name : folder.path + "/" + sub->name;
+                Folder *task = sub.get();
+                folder.folders.push_back(std::move(sub));
+                shared.queue.emplace_back(task, child);
+                guard.unlock();
+                shared.wake.notify_one();
+                queued = true;
+            }
+        }
+        if (!queued) {
             Node sub;
             sub.name = QString::fromLocal8Bit(entry->d_name);
             sub.directory = true;
@@ -293,7 +317,9 @@ Node scan(const QString &path, int keepDepth, quint64 keepMinBytes, Progress &pr
 
     Shared shared;
     shared.device = self.st_dev;
-    shared.mountsIn = mountsInside(QFile::encodeName(QDir::cleanPath(path)));
+    const QString canonical = QFileInfo(path).canonicalFilePath();
+    shared.mountsIn =
+        mountsInside(QFile::encodeName(canonical.isEmpty() ? QDir::cleanPath(path) : canonical));
     shared.keepDepth = keepDepth;
     shared.keepMin = keepMinBytes;
     shared.progress = &progress;
@@ -336,13 +362,14 @@ QList<Growth> growth(const QHash<QString, quint64> &before, const QHash<QString,
     QList<Growth> grew;
     for (auto it = after.begin(); it != after.end(); ++it) {
         const auto old = before.constFind(it.key());
-        if (old != before.constEnd() && it.value() >= *old + minDelta)
-            grew.append({it.key(), qint64(it.value() - *old)});
+        if (old != before.constEnd() && it.value() > *old && it.value() - *old >= minDelta)
+            grew.append({it.key(), qint64(qMin<quint64>(it.value() - *old, quint64(INT64_MAX)))});
     }
     QList<Growth> kept;
     for (const Growth &candidate : grew) {
         const bool explainedInside = std::any_of(grew.cbegin(), grew.cend(), [&](const Growth &other) {
-            return other.path.startsWith(candidate.path + "/") && other.delta * 10 >= candidate.delta * 8;
+            return other.path.startsWith(candidate.path + "/") &&
+                   double(other.delta) >= double(candidate.delta) * 0.8;
         });
         if (!explainedInside)
             kept.append(candidate);
@@ -386,8 +413,12 @@ Node fromJson(const QJsonObject &object) {
     node.bytes = quint64(qMax(0.0, object.value("b").toDouble()));
     node.directory = object.value("d").toBool();
     node.detailed = !object.value("x").toBool();
-    for (const QJsonValue &child : object.value("c").toArray())
-        node.children.append(fromJson(child.toObject()));
+    for (const QJsonValue &child : object.value("c").toArray()) {
+        Node sub = fromJson(child.toObject());
+        if (sub.name.isEmpty() || sub.name == "." || sub.name == ".." || sub.name.contains('/'))
+            continue;
+        node.children.append(std::move(sub));
+    }
     return node;
 }
 
@@ -427,11 +458,14 @@ Storage::Storage(const QString &home, const QString &cacheFile, QObject *parent)
 }
 
 Storage::~Storage() {
-    if (m_progress)
+    if (m_progress) {
+        std::lock_guard guard(m_progress->aliveLock);
+        m_progress->alive = false;
         m_progress->cancel = true;
+    }
     // A scan stuck on a hung disk must not keep Keel alive after its window
-    // closes. The thread checks the cancel flag before touching this object,
-    // and the process is exiting, so letting it go is safe.
+    // closes. `aliveLock` guarantees the detached thread will never invoke a
+    // method on this object after destruction begins.
     if (m_worker && m_worker->joinable())
         m_worker->detach();
 }
@@ -486,15 +520,15 @@ QString Storage::usedText() const {
 QString Storage::freeText() const {
     double total, free;
     disk(total, free);
-    return vitals::bytesText(free) + " free";
+    return vitals::bytesText(free);
 }
 
 QString Storage::status() const {
     if (scanning())
-        return QString("scanning… %1 files so far").arg(QLocale().toString(m_progress->files.load()));
+        return QString("Scanning… %1 files so far").arg(QLocale().toString(m_progress->files.load()));
     if (!m_loaded)
         return QString();
-    return "scanned " + ago(m_scannedAt);
+    return "Scanned " + ago(m_scannedAt);
 }
 
 QVariantList Storage::entries() const {
@@ -555,7 +589,6 @@ void Storage::rescan() {
 void Storage::startScan(const QStringList &trail) {
     if (scanning())
         return;
-    m_scanTrail = trail;
     m_progress = std::make_shared<storage::Progress>();
     if (trail.isEmpty()) {
         // Files of a gigabyte or more, unchanged for six months.
@@ -566,6 +599,14 @@ void Storage::startScan(const QStringList &trail) {
     auto progress = m_progress;
     m_worker = std::make_unique<std::thread>([this, path, trail, progress] {
         storage::Node node = storage::scan(path, keepDepth, keepMin, *progress);
+        qint64 packageCacheBytes = -1;
+        if (trail.isEmpty() && !progress->cancel) {
+            const QString packages = "/var/cache/pacman/pkg";
+            if (QFileInfo(packages).isReadable()) {
+                storage::Progress pkgProgress;
+                packageCacheBytes = qint64(storage::scan(packages, 0, keepMin, pkgProgress).bytes);
+            }
+        }
         if (progress->cancel)
             return;
         QList<storage::StaleFile> stale;
@@ -573,10 +614,13 @@ void Storage::startScan(const QStringList &trail) {
             std::lock_guard guard(progress->staleLock);
             stale = progress->stale;
         }
+        std::lock_guard guard(progress->aliveLock);
+        if (!progress->alive || progress->cancel)
+            return;
         QMetaObject::invokeMethod(
             this,
-            [this, trail, node = std::move(node), stale]() mutable {
-                finished(trail, std::move(node), stale);
+            [this, trail, node = std::move(node), stale, packageCacheBytes]() mutable {
+                finished(trail, std::move(node), stale, packageCacheBytes);
             },
             Qt::QueuedConnection);
     });
@@ -584,7 +628,8 @@ void Storage::startScan(const QStringList &trail) {
     emit changed();
 }
 
-void Storage::finished(const QStringList &trail, storage::Node node, QList<storage::StaleFile> stale) {
+void Storage::finished(const QStringList &trail, storage::Node node, QList<storage::StaleFile> stale,
+                       qint64 packageCacheBytes) {
     m_worker->join();
     m_worker.reset();
     m_tick.stop();
@@ -601,12 +646,29 @@ void Storage::finished(const QStringList &trail, storage::Node node, QList<stora
         if (stale.size() > 8)
             stale.resize(8);
         m_stale = stale;
+        m_packageCacheBytes = packageCacheBytes;
     } else if (storage::Node *target = const_cast<storage::Node *>(storage::find(m_root, trail))) {
-        // A deeper scan of one folder: graft its detail into the tree,
-        // keeping the folder's own name and adjusting nothing else.
+        // A deeper scan of one folder: graft its detail into the tree and
+        // propagate any size delta up to ancestors so parent bars stay true.
         const QString name = target->name;
+        const quint64 oldBytes = target->bytes;
+        const quint64 newBytes = node.bytes;
         *target = std::move(node);
         target->name = name;
+        storage::Node *ancestor = &m_root;
+        for (qsizetype i = 0; i < trail.size(); ++i) {
+            if (newBytes >= oldBytes)
+                ancestor->bytes += newBytes - oldBytes;
+            else
+                ancestor->bytes -= qMin(ancestor->bytes, oldBytes - newBytes);
+            if (i + 1 < trail.size()) {
+                auto it = std::find_if(ancestor->children.begin(), ancestor->children.end(),
+                                       [&](const storage::Node &c) { return c.name == trail[i]; });
+                if (it == ancestor->children.end())
+                    break;
+                ancestor = &*it;
+            }
+        }
     }
     m_loaded = true;
     buildSpots();
@@ -621,7 +683,7 @@ void Storage::buildSpots() {
         QString label, path;
     };
     const QList<Spot> places{
-        {"trash", ".local/share/Trash"}, {"app caches", ".cache"}, {"downloads", "Downloads"}};
+        {"Trash", ".local/share/Trash"}, {"App caches", ".cache"}, {"Downloads", "Downloads"}};
     m_spots.clear();
     for (const Spot &spot : places) {
         const storage::Node *node = storage::find(m_root, spot.path.split('/'));
@@ -630,13 +692,10 @@ void Storage::buildSpots() {
         m_spots.append(
             QVariantMap{{"label", spot.label}, {"path", m_home + "/" + spot.path}, {"size", size}});
     }
-    const QString packages = "/var/cache/pacman/pkg";
-    if (QFileInfo(packages).isReadable()) {
-        storage::Progress progress;
-        const storage::Node node = storage::scan(packages, 0, keepMin, progress);
-        m_spots.append(QVariantMap{
-            {"label", "package cache"}, {"path", packages}, {"size", vitals::bytesText(double(node.bytes))}});
-    }
+    if (m_packageCacheBytes >= 0)
+        m_spots.append(QVariantMap{{"label", "Package cache"},
+                                   {"path", "/var/cache/pacman/pkg"},
+                                   {"size", vitals::bytesText(double(m_packageCacheBytes))}});
 }
 
 void Storage::save() const {
@@ -667,6 +726,8 @@ void Storage::enter(int index) {
     const storage::Node *node = current();
     if (!node || index < 0 || index >= node->children.size() || !node->children[index].directory)
         return;
+    if (!node->children[index].detailed && scanning())
+        return;
     m_trail.append(node->children[index].name);
     // Past the kept detail, look closer with a scan of just this folder.
     if (!node->children[index].detailed)
@@ -687,8 +748,10 @@ void Storage::reveal(int index) {
         return;
     const storage::Node &child = node->children[index];
     // A file opens its folder, so the file manager shows where it lives.
-    const QString path = pathOf(m_trail) + (child.directory ? "/" + child.name : QString());
-    QDesktopServices::openUrl(QUrl::fromLocalFile(path));
+    QStringList parts = m_trail;
+    if (child.directory)
+        parts.append(child.name);
+    revealInside(parts.isEmpty() ? QString(".") : parts.join('/'));
 }
 
 QVariantList Storage::grown() const {
@@ -722,13 +785,19 @@ QVariantList Storage::stale() const {
 
 void Storage::revealInside(const QString &relative) const {
     // Paths come from the saved scan file, so they're checked before use:
-    // relative, no "..", and still inside the home folder once resolved.
+    // relative, no "..", a real directory, and still inside the home folder
+    // after resolving symlinks.
     if (relative.isEmpty() || relative.startsWith('/') || relative.split('/').contains(".."))
         return;
-    const QString path = QDir::cleanPath(m_home + "/" + relative);
-    if ((path != m_home && !path.startsWith(m_home + "/")) || !QFileInfo::exists(path))
+    const QString canonicalHome = QFileInfo(m_home).canonicalFilePath();
+    if (canonicalHome.isEmpty())
         return;
-    QDesktopServices::openUrl(QUrl::fromLocalFile(path));
+    const QFileInfo target(QDir::cleanPath(m_home + "/" + relative));
+    const QString resolved = target.canonicalFilePath();
+    if (resolved.isEmpty() || !target.isDir() ||
+        (resolved != canonicalHome && !resolved.startsWith(canonicalHome + "/")))
+        return;
+    QDesktopServices::openUrl(QUrl::fromLocalFile(resolved));
 }
 
 void Storage::revealGrown(int index) {

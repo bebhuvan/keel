@@ -26,6 +26,7 @@ class Backend : public QObject {
     Q_PROPERTY(QVariantList processes READ processes NOTIFY detailsSampled)
     Q_PROPERTY(bool sortByMemory READ sortByMemory WRITE setSortByMemory NOTIFY viewChanged)
     Q_PROPERTY(bool detailed READ detailed WRITE setDetailed NOTIFY viewChanged)
+    Q_PROPERTY(bool showHeavy READ showHeavy WRITE setShowHeavy NOTIFY viewChanged)
     Q_PROPERTY(QString filter READ filter WRITE setFilter NOTIFY viewChanged)
     Q_PROPERTY(QVariantList cpuHistory READ cpuHistory NOTIFY sampled)
     Q_PROPERTY(QVariantList downHistory READ downHistory NOTIFY sampled)
@@ -51,6 +52,8 @@ class Backend : public QObject {
     void setSortByMemory(bool byMemory);
     bool detailed() const { return m_detailed; }
     void setDetailed(bool detailed);
+    bool showHeavy() const { return m_showHeavy; }
+    void setShowHeavy(bool show);
     QString filter() const { return m_filter; }
     void setFilter(const QString &filter);
     // The last two minutes, oldest first, each value 0..1 of its own peak.
@@ -79,6 +82,9 @@ class Backend : public QObject {
   private:
     void sample();
     void findSensors();
+    void publishHeavy(const QList<apps::Window> &windows);
+    void publishDetails(const QByteArray &stat, double cpuPercent, const vitals::Memory &memory,
+                        const vitals::Reading &reading, double celsius, double uptime, qint64 nowMs);
     void publishProcesses();
     static void push(QList<double> &history, double value);
     static double peak(const QList<double> &history);
@@ -89,7 +95,10 @@ class Backend : public QObject {
     Controls m_controls;
     QTimer m_timer;
     qint64 m_lastSampleMs = 0;
+    qint64 m_lastDiskMs = 0;
     quint64 m_tick = 0;
+    bool m_haveNetSample = false;
+    bool m_haveDiskSample = false;
 
     vitals::CpuTimes m_cpu;
     QList<vitals::CpuTimes> m_coreTimes;
@@ -101,12 +110,15 @@ class Backend : public QObject {
     quint64 m_pageSize = 4096;
 
     vitals::Battery m_battery;
+    QString m_lastBatteryStatus;
+    QList<double> m_powerHistory;
     vitals::Summary m_summary;
     QVariantList m_heavy;
     QVariantList m_meters, m_apps, m_cores, m_sections, m_processRows;
     QList<apps::Usage> m_usages;
     bool m_sortByMemory = false;
     bool m_detailed = false;
+    bool m_showHeavy = false;
     QString m_filter;
     QList<double> m_cpuHistory, m_heatHistory, m_downHistory, m_upHistory;
 };
