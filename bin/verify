@@ -1,6 +1,6 @@
 #!/bin/sh
 # The one check to run before calling anything done: formatting, QML lint,
-# a warnings-as-errors build, and the tests.
+# a warnings-as-errors build, the tests, and a scan for committed secrets.
 set -eu
 
 ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
@@ -18,5 +18,12 @@ bin/build
 
 echo "== tests"
 bin/test
+
+echo "== secrets"
+if command -v gitleaks >/dev/null 2>&1; then
+  gitleaks git --no-banner --redact .
+else
+  echo "gitleaks not installed; skipped"
+fi
 
 echo "verify: all checks passed"

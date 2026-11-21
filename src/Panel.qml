@@ -7,7 +7,10 @@ Rectangle {
 
     property string title: ""
     property string aside: ""
+    property bool titleClickable: false
     default property alias content: column.data
+
+    signal titleClicked()
 
     implicitHeight: column.implicitHeight + 28
     color: theme.bar
@@ -24,8 +27,14 @@ Rectangle {
             visible: panel.title !== ""
             width: parent.width
             height: 14
-            Text { text: panel.title; color: theme.muted; font.pixelSize: 11; font.letterSpacing: 1 }
-            Text { anchors.right: parent.right; text: panel.aside; color: theme.muted; font.pixelSize: 11 }
+            MouseArea {
+                anchors.fill: parent
+                enabled: panel.titleClickable
+                cursorShape: Qt.PointingHandCursor
+                onClicked: panel.titleClicked()
+            }
+            PlainText { text: panel.title; color: theme.muted; font.pixelSize: 11; font.letterSpacing: 1 }
+            PlainText { anchors.right: parent.right; text: panel.aside; color: theme.muted; font.pixelSize: 11 }
         }
     }
 }

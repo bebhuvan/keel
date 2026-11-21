@@ -1,11 +1,13 @@
 #include <QDir>
 #include <QFile>
+#include <QProcess>
 #include <QRandomGenerator>
 #include <QTemporaryDir>
 #include <QtTest>
 #include <unistd.h>
 
 #include "apps.h"
+#include "cleanup.h"
 #include "controls.h"
 #include "hyprland.h"
 #include "storage.h"
@@ -232,9 +234,25 @@ class KeelTests : public QObject {
     }
 
     void endingRefusesKeelAndInit() {
-        QVERIFY(!apps::endProcess(1, false));
-        QVERIFY(!apps::endProcess(1, true));
-        QVERIFY(!apps::endProcess(int(QCoreApplication::applicationPid()), true));
+        QVERIFY(!apps::endProcess(1, 0, false));
+        QVERIFY(!apps::endProcess(1, 0, true));
+        QVERIFY(!apps::endProcess(int(QCoreApplication::applicationPid()), 0, true));
+    }
+
+    void endingChecksItIsStillTheSameProcess() {
+        QProcess sleeper;
+        sleeper.start("sleep", {"30"});
+        QVERIFY(sleeper.waitForStarted());
+        const int pid = int(sleeper.processId());
+        QFile stat("/proc/" + QString::number(pid) + "/stat");
+        QVERIFY(stat.open(QIODevice::ReadOnly));
+        apps::Process process;
+        QVERIFY(apps::parseStat(stat.readAll(), process));
+        // A different start time means the pid was reused: nothing is sent.
+        QVERIFY(!apps::endProcess(pid, process.start + 1, false));
+        QCOMPARE(sleeper.state(), QProcess::Running);
+        QVERIFY(apps::endProcess(pid, process.start, false));
+        QVERIFY(sleeper.waitForFinished(3000));
     }
 
     void theSessionIsNeverOfferedForEnding() {
@@ -242,6 +260,10 @@ class KeelTests : public QObject {
         QVERIFY(apps::isEssential("Hyprland"));
         QVERIFY(apps::isEssential("systemd-logind"));
         QVERIFY(apps::isEssential("pipewire"));
+        QVERIFY(apps::isEssential("start-hyprland"));
+        QVERIFY(apps::isEssential("(sd-pam)"));
+        QVERIFY(apps::isEssential("gvfsd-fuse"));
+        QVERIFY(apps::isEssential("omarchy-shell"));
         QVERIFY(!apps::isEssential("chromium"));
         QVERIFY(!apps::isEssential("python"));
 
@@ -402,8 +424,134 @@ class KeelTests : public QObject {
         second.open();
         QVERIFY(!second.scanning()); // loaded, not scanned
         QVERIFY(second.status().startsWith("scanned"));
-        QVERIFY(second.emptyTrash());
-        QVERIFY(QDir(home.path() + "/.local/share/Trash/files").isEmpty());
+    }
+
+    void growthNamesWhereTheSpaceWent() {
+        const QHash<QString, quint64> before{
+            {"Documents", 100}, {"Documents/Work", 50}, {"Videos", 10}, {".cache", 5}};
+        const QHash<QString, quint64> after{
+            {"Documents", 400}, {"Documents/Work", 340}, {"Videos", 200}, {".cache", 6}};
+        const auto grew = storage::growth(before, after, 100, 5);
+        // Work explains nearly all of Documents' growth, so Documents itself
+        // is left out; the cache's tiny change is under the threshold.
+        QCOMPARE(grew.size(), 2);
+        QCOMPARE(grew[0].path, QString("Documents/Work"));
+        QCOMPARE(grew[0].delta, qint64(290));
+        QCOMPARE(grew[1].path, QString("Videos"));
+    }
+
+    void flattenListsFoldersOnly() {
+        const storage::Node root{
+            "home",
+            10,
+            true,
+            true,
+            {{"A", 6, true, true, {{"B", 4, true, true, {}}, {"f.iso", 2, false, true, {}}}},
+             {"g.iso", 4, false, true, {}}}};
+        const auto flat = storage::flatten(root, 3);
+        QCOMPARE(flat.size(), 2);
+        QCOMPARE(flat.value("A/B"), quint64(4));
+    }
+
+    void scanFindsBigUntouchedFiles() {
+        QTemporaryDir dir;
+        QDir(dir.path()).mkpath("old");
+        writeBytes(dir.path() + "/old/archive.bin", 200 * 1024);
+        writeBytes(dir.path() + "/fresh.bin", 200 * 1024);
+        QFile old(dir.path() + "/old/archive.bin");
+        QVERIFY(old.open(QIODevice::ReadWrite));
+        QVERIFY(
+            old.setFileTime(QDateTime::currentDateTime().addYears(-2), QFileDevice::FileModificationTime));
+        old.close();
+        storage::Progress progress;
+        progress.staleMin = 100 * 1024;
+        progress.staleBefore = QDateTime::currentSecsSinceEpoch() - 182 * 86400;
+        storage::scan(dir.path(), 2, 0, progress);
+        QCOMPARE(progress.stale.size(), 1);
+        QCOMPARE(progress.stale.first().path, QString("old/archive.bin"));
+    }
+
+    void cleanupReadsWhatTheToolsReport() {
+        QCOMPARE(cleanup::parsePaccache("==> finished dry run: 3 candidates (disk space saved: 5.71 MiB)\n"),
+                 quint64(5.71 * 1048576));
+        QCOMPARE(cleanup::parsePaccache("==> no candidate packages found for pruning\n"), quint64(0));
+        QCOMPARE(
+            cleanup::parseJournalUsage("Archived and active journals take up 95.8M in the file system.\n"),
+            quint64(95.8 * 1048576));
+        QCOMPARE(cleanup::parseJournalUsage("Archived and active journals take up 1.2G in the file system."),
+                 quint64(1.2 * 1073741824));
+    }
+
+    void cleanupEmptiesOnlyInsideAndRefusesLinks() {
+        QTemporaryDir home, elsewhere;
+        QDir(home.path()).mkpath("cache/sub");
+        writeBytes(home.path() + "/cache/a", 10);
+        writeBytes(home.path() + "/cache/sub/b", 10);
+        writeBytes(elsewhere.path() + "/precious", 10);
+        // A link inside is removed as a link; what it points to survives.
+        QVERIFY(QFile::link(elsewhere.path(), home.path() + "/cache/link"));
+        QVERIFY(cleanup::emptyFolder(home.path(), "cache"));
+        QVERIFY(QDir(home.path() + "/cache").exists());
+        QVERIFY(QDir(home.path() + "/cache")
+                    .isEmpty(QDir::AllEntries | QDir::NoDotAndDotDot | QDir::Hidden | QDir::System));
+        QVERIFY(QFile::exists(elsewhere.path() + "/precious"));
+        // A folder that is itself a link is refused outright…
+        QVERIFY(QFile::link(elsewhere.path(), home.path() + "/trap"));
+        QVERIFY(!cleanup::emptyFolder(home.path(), "trap"));
+        // …and so is one reached through a linked parent, the trash case.
+        QDir(elsewhere.path()).mkpath("files");
+        writeBytes(elsewhere.path() + "/files/also-precious", 10);
+        QDir(home.path()).mkpath(".local/share");
+        QVERIFY(QFile::link(elsewhere.path(), home.path() + "/.local/share/Trash"));
+        QVERIFY(!cleanup::emptyFolder(home.path(), ".local/share/Trash/files"));
+        QVERIFY(QFile::exists(elsewhere.path() + "/files/also-precious"));
+        QVERIFY(QFile::exists(elsewhere.path() + "/precious"));
+        QVERIFY(!cleanup::emptyFolder(home.path(), "../escape"));
+        QVERIFY(cleanup::emptyFolder(home.path(), "missing"));
+    }
+
+    void cleanupNeverTouchesOutsideItsList() {
+        for (const char *id : {"trash", "thumbnails", "aur", "dev"})
+            for (const QString &folder : Cleanup::folders(id)) {
+                QVERIFY(!folder.startsWith('/'));
+                QVERIFY(!folder.contains(".."));
+            }
+        QVERIFY(Cleanup::folders("anything else").isEmpty());
+    }
+
+    void heaviestSinceOpenedRanksByLifetime() {
+        QHash<int, apps::Process> procs{{1, {"/a", "a", 9000, 1}}, {2, {"/b", "b", 100, 1}}};
+        QHash<int, apps::Process> before = procs;
+        before[2].ticks = 0; // b is busy right now, a has done more overall
+        QCOMPARE(apps::rank(before, procs, 100, 4096, {}, 2).first().name, QString("b"));
+        const auto heavy = apps::rank(before, procs, 100, 4096, {}, 2, true, 100);
+        QCOMPARE(heavy.first().name, QString("a"));
+        QCOMPARE(heavy.first().cpuSeconds, 90.0);
+    }
+
+    void deviceBatteriesReadNicely() {
+        QCOMPARE(Controls::formatDevices({{"WH-1000XM4", 80}, {"MX Master 3", 55}}),
+                 QString("wh-1000xm4 80%  ·  mx master 3 55%"));
+        QVERIFY(Controls::formatDevices({}).isEmpty());
+    }
+
+    void theHelperRefusesAnythingButItsFixedSteps() {
+        // Only the refusals are tried: each exits before doing anything, and
+        // none of this runs as root.
+        const QString helper = QFINDTESTDATA("../pkgbuild/keel-helper");
+        QVERIFY(!helper.isEmpty());
+        for (const QStringList &arguments : QList<QStringList>{{},
+                                                               {"rm", "-rf", "/"},
+                                                               {"clean-system"},
+                                                               {"clean-system", "packages", "; rm -rf /"},
+                                                               {"battery-care"},
+                                                               {"battery-care", "maybe"},
+                                                               {"battery-care", "on", "extra"}}) {
+            QProcess run;
+            run.start("sh", QStringList{helper} + arguments);
+            QVERIFY(run.waitForFinished(5000));
+            QCOMPARE(run.exitCode(), 2);
+        }
     }
 
     void stayAwakeIsReadFromOmarchysFlag() {

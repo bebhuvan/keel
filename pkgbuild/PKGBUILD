@@ -4,7 +4,7 @@ pkgrel=1
 pkgdesc='A calm command center for an Omarchy laptop: stats in plain words, switches, apps and disk space'
 arch=('x86_64' 'aarch64')
 license=('MIT')
-depends=('qt6-base' 'qt6-declarative' 'qt6-wayland' 'networkmanager' 'wireplumber' 'brightnessctl' 'power-profiles-daemon')
+depends=('qt6-base' 'qt6-declarative' 'qt6-wayland' 'networkmanager' 'wireplumber' 'brightnessctl' 'power-profiles-daemon' 'polkit' 'pacman-contrib')
 makedepends=('gcc' 'make')
 source=()
 sha256sums=()
@@ -20,4 +20,6 @@ package() {
   install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
   install -Dm644 "$startdir/keel.svg" "$pkgdir/usr/share/icons/hicolor/scalable/apps/keel.svg"
   install -Dm644 "$startdir/keel.desktop" "$pkgdir/usr/share/applications/keel.desktop"
+  install -Dm755 "$startdir/keel-helper" "$pkgdir/usr/lib/keel/keel-helper"
+  install -Dm644 "$startdir/dev.keel.helper.policy" "$pkgdir/usr/share/polkit-1/actions/dev.keel.helper.policy"
 }

@@ -3,6 +3,9 @@
 #include "hyprland.h"
 
 #include <QDBusInterface>
+#include <QDBusMetaType>
+#include <QDBusObjectPath>
+#include <QDBusReply>
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
@@ -35,6 +38,8 @@ bool powerSaverOn() {
     return profiles.property("ActiveProfile").toString() == "power-saver";
 }
 
+const QString helperPath = "/usr/lib/keel/keel-helper";
+
 QString label(const QString &id) {
     static const QHash<QString, QString> names{{"wifi", "wi-fi"},          {"bluetooth", "bluetooth"},
                                                {"dnd", "do not disturb"},  {"night", "night light"},
@@ -55,6 +60,12 @@ Controls::Controls(const QString &stateDirectory, const QString &backlightDirect
         if (!panels.isEmpty())
             m_backlightDirectory = "/sys/class/backlight/" + panels.first();
     }
+    for (const QFileInfo &supply :
+         QDir("/sys/class/power_supply").entryInfoList(QDir::Dirs | QDir::NoDotAndDotDot))
+        if (QFileInfo::exists(supply.filePath() + "/charge_control_end_threshold") &&
+            m_batteryDirectory.isEmpty() &&
+            QRegularExpression("^BAT[0-9]{1,2}$").match(supply.fileName()).hasMatch())
+            m_batteryDirectory = supply.filePath();
     for (const QString &id : ids())
         m_states.insert(id, false);
     m_errorClear.setSingleShot(true);
@@ -171,6 +182,33 @@ QString Controls::parseDisplay(const QByteArray &monitorsJson, QString &name) {
     return laptopOn ? "both" : "monitor";
 }
 
+QString Controls::formatDevices(const QList<QPair<QString, int>> &devices) {
+    QStringList parts;
+    for (const auto &device : devices)
+        parts.append(QString("%1 %2%").arg(device.first.toLower()).arg(device.second));
+    return parts.join("  ·  ");
+}
+
+void Controls::toggleBatteryCare() {
+    if (m_batteryDirectory.isEmpty())
+        return fail("this battery doesn't support a charge limit.");
+    if (m_pending.contains("care"))
+        return;
+    const bool on = !m_batteryCare;
+    m_batteryCare = on;
+    emit changed();
+    // The helper does the root part; it's installed with Keel and its
+    // password prompt says what it's for.
+    if (!QFileInfo::exists(helperPath)) {
+        m_batteryCare = !on;
+        return fail("battery care needs keel installed (bin/install), not run from the build folder.");
+    }
+    run("care",
+        on ? "battery care wasn't turned on. it needs your password."
+           : "battery care wasn't turned off. it needs your password.",
+        "pkexec", {helperPath, "battery-care", on ? "on" : "off"});
+}
+
 QVariantMap Controls::states() const {
     QVariantMap map;
     for (auto it = m_states.begin(); it != m_states.end(); ++it)
@@ -229,6 +267,36 @@ void Controls::refresh() {
 }
 
 void Controls::refreshSlow() {
+    if (!m_batteryDirectory.isEmpty() && !m_pending.contains("care")) {
+        const bool care = readFile(m_batteryDirectory + "/charge_control_end_threshold").toInt() <= 90;
+        if (care != m_batteryCare) {
+            m_batteryCare = care;
+            emit changed();
+        }
+    }
+    // Headphones, mice and keyboards report their batteries through UPower.
+    QDBusInterface upower("org.freedesktop.UPower", "/org/freedesktop/UPower", "org.freedesktop.UPower",
+                          QDBusConnection::systemBus());
+    const QDBusReply<QList<QDBusObjectPath>> paths = upower.call("EnumerateDevices");
+    QList<QPair<QString, int>> devices;
+    if (paths.isValid())
+        for (const QDBusObjectPath &path : paths.value()) {
+            const QString name = path.path().section('/', -1);
+            if (name.startsWith("battery_BAT") || name.startsWith("line_power") || name == "DisplayDevice")
+                continue;
+            QDBusInterface device("org.freedesktop.UPower", path.path(), "org.freedesktop.UPower.Device",
+                                  QDBusConnection::systemBus());
+            const QString model = device.property("Model").toString().trimmed();
+            const int percent = qRound(device.property("Percentage").toDouble());
+            if (!model.isEmpty() && percent > 0)
+                devices.append({model, percent});
+        }
+    const QString formatted = formatDevices(devices);
+    if (formatted != m_devices) {
+        m_devices = formatted;
+        emit changed();
+    }
+
     // A D-Bus round trip and a Hyprland request: cheap, but not free.
     update("saver", powerSaverOn());
     if (!m_pending.contains("display")) {

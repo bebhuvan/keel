@@ -32,7 +32,9 @@ struct Usage {
     quint64 memoryBytes = 0;
     QStringList windows; // Hyprland addresses; empty means a background program
     QList<int> pids;
+    QList<quint64> starts;  // start time of each pid, to tell a reused pid apart
     bool essential = false; // keeps the desktop running; never offered for ending
+    double cpuSeconds = 0;  // processor time used since each process started
 };
 
 // Fills comm, ticks (utime + stime), start time and resident pages from
@@ -47,12 +49,16 @@ QString friendlyName(const QString &appClass);
 
 // Groups the processes, charges each group the processor time it used
 // between the two samples, and returns the hungriest first.
+// With `byLifetime`, ranks by processor time used since each process started
+// instead: the apps that have cost the most battery while they've been open.
 QList<Usage> rank(const QHash<int, Process> &before, const QHash<int, Process> &now,
-                  quint64 totalTicksElapsed, quint64 pageSize, const QList<Window> &windows, int limit);
+                  quint64 totalTicksElapsed, quint64 pageSize, const QList<Window> &windows, int limit,
+                  bool byLifetime = false, double ticksPerSecond = 100);
 
 // One row of the details page: a single process, not a group.
 struct ProcessUsage {
     int pid = 0;
+    quint64 start = 0;
     QString name;
     double cpu = 0;
     quint64 memoryBytes = 0;
@@ -81,7 +87,9 @@ QHash<int, Process> readProcesses(const QHash<int, Process> &known);
 
 // Asks one of the user's own processes to exit (SIGTERM), which lets it save
 // and clean up, or with `force` stops it outright (SIGKILL) for one that
-// won't listen. Returns false when it is not theirs or already gone.
-bool endProcess(int pid, bool force);
+// won't listen. `start` is the start time seen when the user was asked: if
+// the pid now belongs to a different process, nothing is sent. Returns false
+// when it isn't theirs, is essential, or is already gone.
+bool endProcess(int pid, quint64 start, bool force);
 
 } // namespace apps

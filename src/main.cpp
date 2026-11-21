@@ -10,6 +10,7 @@
 #include <QUrl>
 
 #include "backend.h"
+#include "cleanup.h"
 #include "storage.h"
 #include "theme.h"
 
@@ -36,11 +37,15 @@ int main(int argc, char *argv[]) {
     Theme theme;
     Backend backend;
     Storage storage;
+    Cleanup cleanup;
+    // Cleaning changes the free space the storage page shows.
+    QObject::connect(&cleanup, &Cleanup::cleaned, &storage, &Storage::changed);
 
     QQmlApplicationEngine engine;
     engine.rootContext()->setContextProperty("theme", &theme);
     engine.rootContext()->setContextProperty("backend", &backend);
     engine.rootContext()->setContextProperty("storage", &storage);
+    engine.rootContext()->setContextProperty("cleanup", &cleanup);
     engine.load(QUrl("qrc:/Main.qml"));
     if (engine.rootObjects().isEmpty())
         return 1;

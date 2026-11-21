@@ -93,3 +93,57 @@ reads English. Every string is in one place per file, so translation can be adde
 
 "Keel": the part of a ship that keeps it steady and upright, fitting a calm command center. The
 mark is a waterline over a hull and its keel. No Arch package or command uses the name.
+
+## 14. Free up space: only what's safe, measured first, one prompt
+
+The button opens a list of what it would clear, each measured, and clears what's ticked: trash,
+thumbnails, AUR build leftovers, old package versions (keeping the last two, so a downgrade still
+works), system logs older than two weeks, and, unticked by default, developer download caches
+(npm, pip, uv, Gradle, Cargo, Go), which cost a re-download. The paths are a fixed list in
+`Cleanup::folders`, and a folder is emptied only if its real location is exactly that path, so a
+planted symlink can't redirect the deletion. Rejected: browser caches (unsafe while the browser
+runs), orphaned packages (removing software is a decision, not a clean-up), and anything found by
+pattern rather than by name.
+
+## 15. Admin steps go through one installed helper with its own prompt
+
+Battery care and the system half of free up space run `pkexec /usr/lib/keel/keel-helper …`. The
+helper accepts only `clean-system packages|logs` and `battery-care on|off`, and a polkit policy
+gives the password prompt a plain message. Rejected: `pkexec sh -c …`, whose prompt only says
+`/bin/sh`, so the user can't tell what they're approving, and which would run any command line.
+Run from the build folder these features say they need the installed package.
+
+## 16. Battery care writes Omarchy's charge-threshold rule
+
+It stops charging at 80% and resumes below 75%. It's kept across restarts by
+`/etc/udev/rules.d/99-battery-charge-threshold.rules`, the same file and format already present
+(disabled) on this machine, and switched off by renaming it back to `.disabled`.
+
+## 17. "Battery hogs" means processor time since each app opened
+
+Keel only runs while its window is open, so it can't know what drained the battery since you
+unplugged; that needs a background service, which Keel deliberately isn't (decision 4). Total
+processor time since each app started is the next best measure of drain, and the page says which
+it is.
+
+## 18. Lessons from the first security review
+
+A fresh-eyes review (kept in `build/security-review.md`, not committed) found the following, all
+now fixed and tested:
+
+- The "end?" question remembered a list position while the list re-sorted. It now carries the
+  exact `[pid, start time]` pairs and window addresses, and each pid's start time is checked again
+  before a signal is sent.
+- The trash could be emptied through a symlinked parent (fixed by decision 14's rule).
+- Names from outside (Wi-Fi, files, processes, devices) were drawn as rich text, which could load
+  remote images. Every label is now `PlainText`, and the few styled ones escape anything not
+  written by Keel.
+- A tree tens of thousands of folders deep crashed the scanner. It now stops entering at 512
+  levels and raises its open-file limit.
+- A hung network drive inside the home folder could hang the scan, and keep Keel running after
+  its window closed. Mounts are skipped by name before they're touched, and closing never waits
+  on a stuck scan.
+- uwsm, `start-hyprland` and other session programs could be ended, and interpreter scripts shared
+  one group. Session programs are refused everywhere, scripts are grouped by name, and the
+  question says how many processes it will end.
+- Releases are built with makepkg's hardening flags; CI and a secrets scan run `bin/verify`.

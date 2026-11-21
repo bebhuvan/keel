@@ -20,6 +20,7 @@ class Backend : public QObject {
     Q_PROPERTY(bool calm READ calm NOTIFY sampled)
     Q_PROPERTY(QVariantList meters READ meters NOTIFY sampled)
     Q_PROPERTY(QVariantList apps READ apps NOTIFY sampled)
+    Q_PROPERTY(QVariantList heavy READ heavy NOTIFY sampled)
     Q_PROPERTY(QVariantList cores READ cores NOTIFY detailsSampled)
     Q_PROPERTY(QVariantList sections READ sections NOTIFY detailsSampled)
     Q_PROPERTY(QVariantList processes READ processes NOTIFY detailsSampled)
@@ -41,6 +42,8 @@ class Backend : public QObject {
     bool calm() const { return m_summary.calm; }
     QVariantList meters() const { return m_meters; }
     QVariantList apps() const { return m_apps; }
+    // The apps that have used the most processor time since they opened.
+    QVariantList heavy() const { return m_heavy; }
     QVariantList cores() const { return m_cores; }
     QVariantList sections() const { return m_sections; }
     QVariantList processes() const { return m_processRows; }
@@ -58,13 +61,13 @@ class Backend : public QObject {
     QString upPeak() const;
     Controls *controls() { return &m_controls; }
 
-    // Closes every window of an app on the busiest list gracefully, as its
-    // close button would, so it can ask to save.
-    Q_INVOKABLE bool quitApp(int index);
-    // Ends every process of an app on the busiest list (for background
-    // programs, which have no window to close).
-    Q_INVOKABLE bool endApp(int index, bool force);
-    Q_INVOKABLE bool endProcess(int pid, bool force);
+    // Closes windows gracefully, as their close buttons would, so apps can
+    // ask to save. Takes the addresses the window showed, not a list
+    // position, because the list re-sorts every two seconds.
+    Q_INVOKABLE bool closeWindows(const QStringList &addresses);
+    // Ends the processes the user was asked about: a list of [pid, start]
+    // pairs, each checked again so a reused pid is never hit.
+    Q_INVOKABLE bool endProcesses(const QVariantList &targets, bool force);
 
   signals:
     // Separate signals so a tick on the overview never re-evaluates the
@@ -99,6 +102,7 @@ class Backend : public QObject {
 
     vitals::Battery m_battery;
     vitals::Summary m_summary;
+    QVariantList m_heavy;
     QVariantList m_meters, m_apps, m_cores, m_sections, m_processRows;
     QList<apps::Usage> m_usages;
     bool m_sortByMemory = false;

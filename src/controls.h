@@ -26,6 +26,9 @@ class Controls : public QObject {
     Q_PROPERTY(bool muted READ muted NOTIFY changed)
     Q_PROPERTY(QString display READ display NOTIFY changed)
     Q_PROPERTY(QString monitor READ monitor NOTIFY changed)
+    Q_PROPERTY(QString devices READ devices NOTIFY changed)
+    Q_PROPERTY(bool batteryCare READ batteryCare NOTIFY changed)
+    Q_PROPERTY(bool batteryCareAvailable READ batteryCareAvailable NOTIFY changed)
 
   public:
     // The directories are parameters so tests can point them at temp dirs.
@@ -61,6 +64,14 @@ class Controls : public QObject {
     bool muted() const { return m_muted; }
     QString display() const { return m_display; }
     QString monitor() const { return m_monitor; }
+    // Connected devices that report a battery: "wh-1000xm4 80% · mx master 3 55%".
+    QString devices() const { return m_devices; }
+    // Battery care stops charging at 80% (and resumes below 75%), which keeps
+    // a battery that's mostly plugged in healthy for longer.
+    bool batteryCare() const { return m_batteryCare; }
+    bool batteryCareAvailable() const { return !m_batteryDirectory.isEmpty(); }
+
+    static QString formatDevices(const QList<QPair<QString, int>> &devices);
 
     Q_INVOKABLE void toggle(const QString &id);
     Q_INVOKABLE void applyMode(const QString &mode);
@@ -69,6 +80,9 @@ class Controls : public QObject {
     Q_INVOKABLE void toggleMute();
     Q_INVOKABLE void setDisplay(const QString &choice);
     Q_INVOKABLE void cycleDisplay();
+    // Asks for the password once (the system prompt), then writes the limit
+    // and a rule so it survives restarts.
+    Q_INVOKABLE void toggleBatteryCare();
 
     // Cheap reads from sysfs and D-Bus, for every tick.
     void refresh();
@@ -100,5 +114,8 @@ class Controls : public QObject {
     bool m_muted = false;
     QString m_display = "laptop";
     QString m_monitor;
+    QString m_devices;
+    QString m_batteryDirectory;
+    bool m_batteryCare = false;
     QTimer m_errorClear;
 };

@@ -18,17 +18,21 @@ Window {
     // "overview", "details" or "storage".
     property string page: "overview"
     property bool helpVisible: false
+    property bool showHeavy: false
+    property bool cleaning: false
     property bool searching: false
     property int selectedPid: 0
     property int storageIndex: 0
     // What the "are you sure?" question is about: "process" (a pid), "app"
-    // (an index on the busiest list) or "trash"; empty when nothing is asked.
+    // (an index on the busiest list); empty when nothing is asked.
     property string confirmKind: ""
-    property int confirmTarget: 0
+    // The exact [pid, start] pairs asked about, so a re-sort of the list in
+    // the meantime can never change what gets ended.
+    property var confirmTargets: []
     property string confirmName: ""
     readonly property bool asking: confirmKind !== ""
     // Single-letter keys act only when nothing else wants the keyboard.
-    readonly property bool keysFree: !asking && !searching && !helpVisible
+    readonly property bool keysFree: !asking && !searching && !helpVisible && !cleaning
 
     onPageChanged: {
         backend.detailed = page === "details"
@@ -67,6 +71,12 @@ Window {
         { id: "monitor", label: "monitor only" },
         { id: "mirror", label: "mirror" }
     ]
+
+    // For the few styled labels: anything not written by Keel is escaped
+    // before it goes into markup.
+    function escaped(text) {
+        return String(text).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+    }
 
     function clock() {
         return Qt.formatDateTime(new Date(), "ddd d MMM · HH:mm").toLowerCase()
@@ -115,32 +125,29 @@ Window {
             return
         win.selectedPid = pid
         win.confirmKind = "process"
-        win.confirmTarget = pid
+        win.confirmTargets = row.targets
         win.confirmName = row.name + " (" + pid + ")"
     }
 
     function askToEndApp(index) {
         const app = backend.apps[index]
-        if (!app)
+        if (!app || !app.canEnd)
             return
         win.confirmKind = "app"
-        win.confirmTarget = index
-        win.confirmName = app.name
-    }
-
-    function askToEmptyTrash(size) {
-        win.confirmKind = "trash"
-        win.confirmName = size
+        win.confirmTargets = app.targets
+        win.confirmName = app.targets.length > 1 ? app.name + ", all " + app.targets.length + " of its processes"
+                                                 : app.name
     }
 
     function answer(force) {
-        if (win.confirmKind === "process")
-            backend.endProcess(win.confirmTarget, force)
-        else if (win.confirmKind === "app")
-            backend.endApp(win.confirmTarget, force)
-        else if (win.confirmKind === "trash" && !force)
-            storage.emptyTrash()
+        backend.endProcesses(win.confirmTargets, force)
         win.confirmKind = ""
+    }
+
+    function openCleanup() {
+        page = "storage"
+        cleaning = true
+        cleanup.measure()
     }
 
     function startSearch() {
@@ -160,6 +167,7 @@ Window {
         onActivated: {
             if (win.asking) win.confirmKind = ""
             else if (win.searching || backend.filter !== "") win.stopSearch(false)
+            else if (win.cleaning) win.cleaning = cleanup.busy
             else if (win.helpVisible) win.helpVisible = false
             else Qt.quit()
         } }
@@ -193,8 +201,12 @@ Window {
     Shortcut { sequences: ["Backspace", "Left", "H"]; enabled: win.keysFree && win.page === "storage"; context: Qt.ApplicationShortcut; onActivated: win.leaveFolder() }
     Shortcut { sequence: "O"; enabled: win.keysFree && win.page === "storage"; context: Qt.ApplicationShortcut; onActivated: storage.reveal(win.storageIndex) }
     Shortcut { sequence: "R"; enabled: win.keysFree && win.page === "storage"; context: Qt.ApplicationShortcut; onActivated: storage.rescan() }
+    Shortcut { sequence: "V"; enabled: win.keysFree && win.page === "overview"; context: Qt.ApplicationShortcut; onActivated: win.showHeavy = !win.showHeavy }
+    Shortcut { sequence: "P"; enabled: win.keysFree && win.controls.batteryCareAvailable; context: Qt.ApplicationShortcut; onActivated: win.controls.toggleBatteryCare() }
+    Shortcut { sequence: "F"; enabled: win.keysFree && win.page === "storage"; context: Qt.ApplicationShortcut; onActivated: win.openCleanup() }
+    Shortcut { sequences: ["Return", "Enter"]; enabled: win.cleaning && !cleanup.busy; context: Qt.ApplicationShortcut; onActivated: cleanup.clean() }
     Shortcut { sequence: "Y"; enabled: win.asking; context: Qt.ApplicationShortcut; onActivated: win.answer(false) }
-    Shortcut { sequence: "F"; enabled: win.asking && win.confirmKind !== "trash"; context: Qt.ApplicationShortcut; onActivated: win.answer(true) }
+    Shortcut { sequence: "F"; enabled: win.asking; context: Qt.ApplicationShortcut; onActivated: win.answer(true) }
 
     Timer { interval: 15000; running: true; repeat: true; onTriggered: clockText.text = win.clock() }
 
@@ -239,7 +251,7 @@ Window {
                         g.closePath(); g.fill()
                     }
                 }
-                Text { text: "keel"; color: theme.foreground; font.pixelSize: 13; font.weight: Font.Medium; anchors.verticalCenter: parent.verticalCenter }
+                PlainText { text: "keel"; color: theme.foreground; font.pixelSize: 13; font.weight: Font.Medium; anchors.verticalCenter: parent.verticalCenter }
             }
 
             Row {
@@ -252,7 +264,7 @@ Window {
                         readonly property bool active: win.page === modelData
                         width: tabText.implicitWidth
                         height: topBar.height
-                        Text {
+                        PlainText {
                             id: tabText
                             anchors.centerIn: parent
                             text: modelData
@@ -273,8 +285,8 @@ Window {
             Row {
                 anchors { right: parent.right; rightMargin: 18; verticalCenter: parent.verticalCenter }
                 spacing: 16
-                Text { id: clockText; text: win.clock(); color: theme.muted; font.pixelSize: 12 }
-                Text {
+                PlainText { id: clockText; text: win.clock(); color: theme.muted; font.pixelSize: 12 }
+                PlainText {
                     text: theme.dark ? "◑" : "◐"
                     color: themeArea.containsMouse ? theme.accent : theme.secondary
                     font.pixelSize: 14
@@ -299,14 +311,14 @@ Window {
                 Column {
                     id: headlineColumn
                     width: parent.width - hero.width - 16
-                    Text {
+                    PlainText {
                         text: "mode: " + win.controls.mode
                               + (win.controls.network !== "" ? "  ·  on " + win.controls.network.toLowerCase() : "")
                         color: theme.muted
                         font.pixelSize: 11
                         font.letterSpacing: 0.5
                     }
-                    Text {
+                    PlainText {
                         topPadding: 8
                         bottomPadding: 6
                         width: parent.width
@@ -317,7 +329,7 @@ Window {
                         font.letterSpacing: -0.5
                         elide: Text.ElideRight
                     }
-                    Text {
+                    PlainText {
                         width: parent.width
                         text: backend.line
                         color: theme.secondary
@@ -330,14 +342,14 @@ Window {
                     id: hero
                     anchors { right: parent.right; bottom: parent.bottom; bottomMargin: 2 }
                     readonly property var battery: backend.meters[0] || ({ word: "", detail: "" })
-                    Text {
+                    PlainText {
                         anchors.right: parent.right
                         text: hero.battery.word === "plugged in" || hero.battery.word === "charging" ? hero.battery.detail : hero.battery.word
                         color: theme.accent
                         font.pixelSize: 28
                         font.weight: Font.Light
                     }
-                    Text {
+                    PlainText {
                         anchors.right: parent.right
                         text: hero.battery.word === "plugged in" ? "charged" : hero.battery.word === "charging" ? "charging" : "left"
                         color: theme.muted
@@ -357,12 +369,12 @@ Window {
                         readonly property var m: backend.meters[index] || ({ label: "", level: 0, word: "", detail: "" })
                         width: (win.contentWidth - 20 * 3) / 4
                         spacing: 5
-                        Text { text: m.label; color: theme.muted; font.pixelSize: 11; font.letterSpacing: 0.5 }
+                        PlainText { text: m.label; color: theme.muted; font.pixelSize: 11; font.letterSpacing: 0.5 }
                         Meter { width: parent.width; height: 10; level: m.level; fill: index === 3 && m.level > 0.8 ? theme.warn : theme.accent }
                         Row {
                             spacing: 8
-                            Text { text: m.word; color: theme.foreground; font.pixelSize: 14 }
-                            Text { text: m.detail; color: theme.muted; font.pixelSize: 11; anchors.baseline: parent.children[0].baseline }
+                            PlainText { text: m.word; color: theme.foreground; font.pixelSize: 14 }
+                            PlainText { text: m.detail; color: theme.muted; font.pixelSize: 11; anchors.baseline: parent.children[0].baseline }
                         }
                     }
                 }
@@ -392,8 +404,8 @@ Window {
                             Row {
                                 anchors { left: parent.left; leftMargin: 14; verticalCenter: parent.verticalCenter }
                                 spacing: 10
-                                Text { text: index + 1; color: active ? theme.onAccent : theme.muted; font.pixelSize: 11; anchors.verticalCenter: parent.verticalCenter }
-                                Text { text: modelData; color: active ? theme.onAccent : theme.foreground; font.pixelSize: 13; anchors.verticalCenter: parent.verticalCenter }
+                                PlainText { text: index + 1; color: active ? theme.onAccent : theme.muted; font.pixelSize: 11; anchors.verticalCenter: parent.verticalCenter }
+                                PlainText { text: modelData; color: active ? theme.onAccent : theme.foreground; font.pixelSize: 13; anchors.verticalCenter: parent.verticalCenter }
                             }
                             Rectangle { visible: index > 0; width: 1; height: parent.height; color: theme.line }
                             MouseArea {
@@ -407,7 +419,7 @@ Window {
                     }
                 }
             }
-            Text {
+            PlainText {
                 topPadding: 8
                 bottomPadding: 14
                 text: win.modeNotes[win.controls.mode] || ""
@@ -428,7 +440,7 @@ Window {
                             readonly property bool on: win.controls.states[modelData.id] === true
                             width: (win.contentWidth - 28) / 3
                             height: 20
-                            Text {
+                            PlainText {
                                 anchors.verticalCenter: parent.verticalCenter
                                 width: parent.width - 8
                                 elide: Text.ElideRight
@@ -457,7 +469,7 @@ Window {
                             required property var modelData
                             width: (win.contentWidth - 28 - 20) / 2
                             height: 22
-                            Text { id: levelLabel; width: 110; anchors.verticalCenter: parent.verticalCenter; text: modelData.label; color: theme.secondary; font.pixelSize: 13 }
+                            PlainText { id: levelLabel; width: 110; anchors.verticalCenter: parent.verticalCenter; text: modelData.label; color: theme.secondary; font.pixelSize: 13 }
                             Meter {
                                 anchors { left: levelLabel.right; verticalCenter: parent.verticalCenter }
                                 width: parent.width - 110 - 48
@@ -468,7 +480,7 @@ Window {
                                 onPicked: level => modelData.kind === "brightness" ? win.controls.setBrightness(level)
                                                                                      : win.controls.setVolume(level)
                             }
-                            Text {
+                            PlainText {
                                 anchors { right: parent.right; verticalCenter: parent.verticalCenter }
                                 text: win.percent(modelData.level)
                                 color: theme.foreground
@@ -481,8 +493,8 @@ Window {
                 Item {
                     width: parent.width
                     height: 24
-                    Text { id: screensLabel; width: 110; anchors.verticalCenter: parent.verticalCenter; text: "screens"; color: theme.secondary; font.pixelSize: 13 }
-                    Text {
+                    PlainText { id: screensLabel; width: 110; anchors.verticalCenter: parent.verticalCenter; text: "screens"; color: theme.secondary; font.pixelSize: 13 }
+                    PlainText {
                         visible: win.controls.display === "laptop"
                         anchors { left: screensLabel.right; verticalCenter: parent.verticalCenter }
                         text: "laptop only. plug in a monitor to choose."
@@ -503,7 +515,7 @@ Window {
                                 radius: Math.min(4, theme.radius)
                                 color: active ? theme.accent : choiceArea.containsMouse ? theme.background : "transparent"
                                 border.color: active ? theme.accent : theme.line
-                                Text {
+                                PlainText {
                                     id: choiceText
                                     anchors.centerIn: parent
                                     text: modelData.label
@@ -513,7 +525,7 @@ Window {
                                 MouseArea { id: choiceArea; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: win.controls.setDisplay(modelData.id) }
                             }
                         }
-                        Text {
+                        PlainText {
                             anchors.verticalCenter: parent.verticalCenter
                             leftPadding: 6
                             text: win.controls.monitor + "  e"
@@ -523,7 +535,45 @@ Window {
                     }
                 }
 
-                Text {
+                Item {
+                    visible: win.controls.batteryCareAvailable
+                    width: parent.width
+                    height: 22
+                    PlainText { id: careLabel; width: 110; anchors.verticalCenter: parent.verticalCenter; text: "battery care"; color: theme.secondary; font.pixelSize: 13 }
+                    PlainText {
+                        anchors { left: careLabel.right; verticalCenter: parent.verticalCenter }
+                        text: "<font color='" + (win.controls.batteryCare ? theme.good : theme.muted) + "'>"
+                              + (win.controls.batteryCare ? "●" : "○") + "</font>&nbsp; "
+                              + (win.controls.batteryCare ? "stops charging at 80%" : "charges to 100%")
+                              + " <font color='" + theme.muted + "'>p</font>"
+                        textFormat: Text.StyledText
+                        color: win.controls.batteryCare ? theme.foreground : theme.muted
+                        font.pixelSize: 13
+                        MouseArea { anchors.fill: parent; anchors.margins: -4; cursorShape: Qt.PointingHandCursor; onClicked: win.controls.toggleBatteryCare() }
+                    }
+                    PlainText {
+                        anchors { right: parent.right; verticalCenter: parent.verticalCenter }
+                        text: "best when mostly plugged in · asks for your password"
+                        color: theme.muted
+                        font.pixelSize: 11
+                    }
+                }
+
+                Item {
+                    visible: win.controls.devices !== ""
+                    width: parent.width
+                    height: 20
+                    PlainText { id: devicesLabel; width: 110; anchors.verticalCenter: parent.verticalCenter; text: "devices"; color: theme.secondary; font.pixelSize: 13 }
+                    PlainText {
+                        anchors { left: devicesLabel.right; right: parent.right; verticalCenter: parent.verticalCenter }
+                        text: win.controls.devices
+                        color: theme.foreground
+                        font.pixelSize: 12
+                        elide: Text.ElideRight
+                    }
+                }
+
+                PlainText {
                     visible: win.controls.error !== ""
                     text: win.controls.error
                     color: theme.warn
@@ -535,17 +585,39 @@ Window {
 
             Panel {
                 width: parent.width
-                title: "busiest right now"
-                aside: "quit closes politely · end asks first · system stays"
+                title: win.showHeavy ? "heaviest since they opened" : "busiest right now"
+                aside: win.showHeavy ? "processor time is what drains the battery · v back"
+                                     : "v heaviest since opened · end asks first"
+                titleClickable: true
+                onTitleClicked: win.showHeavy = !win.showHeavy
                 Repeater {
-                    model: 3
+                    model: win.showHeavy ? 3 : 0
+                    Item {
+                        required property int index
+                        readonly property var app: backend.heavy[index]
+                        visible: app !== undefined
+                        width: win.contentWidth - 28
+                        height: 22
+                        PlainText { width: 200; anchors.verticalCenter: parent.verticalCenter; text: app ? app.name : ""; color: theme.foreground; font.pixelSize: 13; elide: Text.ElideRight }
+                        Meter {
+                            x: 208
+                            anchors.verticalCenter: parent.verticalCenter
+                            width: 140
+                            height: 10
+                            level: app && backend.heavy[0] ? app.seconds / Math.max(1, backend.heavy[0].seconds) : 0
+                        }
+                        PlainText { anchors { right: parent.right; verticalCenter: parent.verticalCenter } text: app ? app.detail : ""; color: theme.muted; font.pixelSize: 12 }
+                    }
+                }
+                Repeater {
+                    model: win.showHeavy ? 0 : 3
                     Item {
                         required property int index
                         readonly property var app: backend.apps[index]
                         visible: app !== undefined
                         width: win.contentWidth - 28
                         height: 22
-                        Text {
+                        PlainText {
                             id: appName
                             width: 150
                             anchors.verticalCenter: parent.verticalCenter
@@ -560,7 +632,7 @@ Window {
                             height: 10
                             level: app ? Math.max(app.level, app.level > 0.001 ? 0.1 : 0) : 0
                         }
-                        Text {
+                        PlainText {
                             anchors { right: actionText.left; rightMargin: 16; verticalCenter: parent.verticalCenter }
                             text: app ? app.detail : ""
                             color: theme.muted
@@ -568,7 +640,7 @@ Window {
                         }
                         // Apps with a window close politely, like their close
                         // button; background programs are ended, after asking.
-                        Text {
+                        PlainText {
                             id: actionText
                             anchors { right: parent.right; verticalCenter: parent.verticalCenter }
                             width: 52
@@ -584,7 +656,7 @@ Window {
                                 enabled: app !== undefined && app.canEnd
                                 hoverEnabled: true
                                 cursorShape: Qt.PointingHandCursor
-                                onClicked: app.canQuit ? backend.quitApp(index) : win.askToEndApp(index)
+                                onClicked: app.canQuit ? backend.closeWindows(app.windows) : win.askToEndApp(index)
                             }
                         }
                     }
@@ -651,7 +723,7 @@ Window {
                                 x: 12; y: 10
                                 width: parent.width - 24
                                 spacing: 3
-                                Text { text: section.title; color: theme.accent; font.pixelSize: 11; font.letterSpacing: 1; bottomPadding: 3 }
+                                PlainText { text: section.title; color: theme.accent; font.pixelSize: 11; font.letterSpacing: 1; bottomPadding: 3 }
                                 Repeater {
                                     model: section.rows.length
                                     Item {
@@ -659,8 +731,8 @@ Window {
                                         readonly property var row: parent.parent.section.rows[index]
                                         width: parent.width
                                         height: 17
-                                        Text { id: rowLabel; text: row.label; color: theme.muted; font.pixelSize: 12 }
-                                        Text {
+                                        PlainText { id: rowLabel; text: row.label; color: theme.muted; font.pixelSize: 12 }
+                                        PlainText {
                                             anchors.right: parent.right
                                             width: parent.width - rowLabel.implicitWidth - 10
                                             horizontalAlignment: Text.AlignRight
@@ -696,7 +768,7 @@ Window {
                 Item {
                     width: parent.width
                     height: 22
-                    Text {
+                    PlainText {
                         id: searchPrompt
                         anchors.verticalCenter: parent.verticalCenter
                         text: win.searching || backend.filter !== "" ? "find /" : "processes"
@@ -721,14 +793,14 @@ Window {
                         }
                         Keys.onReturnPressed: win.stopSearch(true)
                         Keys.onEnterPressed: win.stopSearch(true)
-                        Text {
+                        PlainText {
                             visible: searchInput.text === ""
                             text: "type part of a name or a pid"
                             color: theme.muted
                             font.pixelSize: 12
                         }
                     }
-                    Text {
+                    PlainText {
                         id: sortHint
                         anchors { right: parent.right; verticalCenter: parent.verticalCenter }
                         text: "<font color='" + (backend.sortByMemory ? theme.muted : theme.accent) + "'>c cpu</font>  <font color='"
@@ -755,18 +827,18 @@ Window {
                     height: 22
                     color: selected || rowArea.containsMouse ? theme.bar : "transparent"
                     Rectangle { visible: processRow.selected; width: 2; height: parent.height; color: theme.accent }
-                    Text { x: 10; width: 70; anchors.verticalCenter: parent.verticalCenter; text: processRow.process.pid; color: theme.muted; font.pixelSize: 12 }
-                    Text {
+                    PlainText { x: 10; width: 70; anchors.verticalCenter: parent.verticalCenter; text: processRow.process.pid; color: theme.muted; font.pixelSize: 12 }
+                    PlainText {
                         x: 80; width: parent.width - 300; anchors.verticalCenter: parent.verticalCenter
                         text: processRow.process.name; color: theme.foreground; font.pixelSize: 12; elide: Text.ElideRight
                     }
-                    Text {
+                    PlainText {
                         anchors { right: parent.right; rightMargin: 150; verticalCenter: parent.verticalCenter }
                         text: processRow.process.cpu
                         color: backend.sortByMemory ? theme.secondary : theme.foreground
                         font.pixelSize: 12
                     }
-                    Text {
+                    PlainText {
                         anchors { right: parent.right; rightMargin: 56; verticalCenter: parent.verticalCenter }
                         text: processRow.process.memory
                         color: backend.sortByMemory ? theme.foreground : theme.secondary
@@ -779,7 +851,7 @@ Window {
                         onClicked: win.selectedPid = processRow.process.pid
                         onDoubleClicked: win.askToEndProcess(processRow.process.pid)
                     }
-                    Text {
+                    PlainText {
                         anchors { right: parent.right; rightMargin: 10; verticalCenter: parent.verticalCenter }
                         visible: processRow.selected || rowArea.containsMouse
                         text: processRow.process.essential ? "system" : "end"
@@ -797,7 +869,7 @@ Window {
                         }
                     }
                 }
-                Text {
+                PlainText {
                     visible: backend.processes.length === 0 && backend.filter !== ""
                     topPadding: 12
                     leftPadding: 10
@@ -822,10 +894,22 @@ Window {
                 Item {
                     width: parent.width
                     height: 34
-                    Text { anchors.bottom: parent.bottom; text: storage.usedText; color: theme.foreground; font.pixelSize: 24; font.weight: Font.Medium; font.letterSpacing: -0.5 }
-                    Text { anchors { right: parent.right; bottom: parent.bottom; bottomMargin: 3 } text: storage.freeText; color: theme.accent; font.pixelSize: 15 }
+                    PlainText { anchors.bottom: parent.bottom; text: storage.usedText; color: theme.foreground; font.pixelSize: 24; font.weight: Font.Medium; font.letterSpacing: -0.5 }
+                    Row {
+                        anchors { right: parent.right; bottom: parent.bottom }
+                        spacing: 16
+                        PlainText { anchors.verticalCenter: parent.verticalCenter; text: storage.freeText; color: theme.accent; font.pixelSize: 15 }
+                        Rectangle {
+                            width: freeLabel.implicitWidth + 24
+                            height: 30
+                            radius: Math.min(6, theme.radius)
+                            color: freeArea.containsMouse ? Qt.darker(theme.accent, 1.1) : theme.accent
+                            PlainText { id: freeLabel; anchors.centerIn: parent; text: "free up space  f"; color: theme.onAccent; font.pixelSize: 12 }
+                            MouseArea { id: freeArea; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: win.openCleanup() }
+                        }
+                    }
                 }
-                Item { width: 1; height: 10 }
+                Item { width: 1; height: 12 }
                 Rectangle {
                     width: parent.width
                     height: 8
@@ -838,7 +922,7 @@ Window {
                         color: storage.usedFraction > 0.95 ? theme.warn : theme.accent
                     }
                 }
-                Text {
+                PlainText {
                     topPadding: 8
                     width: parent.width
                     wrapMode: Text.WordWrap
@@ -848,60 +932,78 @@ Window {
                     font.pixelSize: 11
                 }
 
-                Item { width: 1; height: 16 }
-
-                Panel {
+                // The usual space hogs, one line; each opens its folder.
+                Flow {
+                    topPadding: 10
                     width: parent.width
-                    title: "easy wins"
-                    aside: "the usual places space piles up"
+                    spacing: 18
                     Repeater {
                         model: storage.spots.length
-                        Item {
+                        PlainText {
                             required property int index
                             readonly property var spot: storage.spots[index]
-                            width: storagePage.width - 28
-                            height: 22
-                            Text { id: spotLabel; width: 120; anchors.verticalCenter: parent.verticalCenter; text: spot.label; color: theme.foreground; font.pixelSize: 13 }
-                            Text { id: spotSize; x: 120; width: 90; anchors.verticalCenter: parent.verticalCenter; text: spot.size; color: theme.accent; font.pixelSize: 13 }
-                            Text {
-                                x: 214
-                                width: parent.width - 214 - spotActions.width - 12
-                                anchors.verticalCenter: parent.verticalCenter
-                                text: spot.note
-                                color: theme.muted
-                                font.pixelSize: 11
-                                elide: Text.ElideRight
-                            }
-                            Row {
-                                id: spotActions
-                                anchors { right: parent.right; verticalCenter: parent.verticalCenter }
-                                spacing: 14
-                                Repeater {
-                                    model: spot.action === "empty" ? ["open", "empty"] : ["open"]
-                                    Text {
-                                        required property string modelData
-                                        text: modelData
-                                        color: spotArea.containsMouse ? (modelData === "empty" ? theme.warn : theme.accent) : theme.secondary
+                            text: win.escaped(spot.label) + " <font color='" + theme.accent + "'>" + win.escaped(spot.size) + "</font>"
+                            textFormat: Text.StyledText
+                            color: spotArea.containsMouse ? theme.foreground : theme.secondary
+                            font.pixelSize: 12
+                            font.underline: spotArea.containsMouse
+                            MouseArea { id: spotArea; anchors.fill: parent; anchors.margins: -3; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: storage.revealSpot(index) }
+                        }
+                    }
+                }
+
+                Item { width: 1; height: 14 }
+
+                Row {
+                    visible: storage.grown.length > 0 || storage.stale.length > 0
+                    spacing: 12
+                    Repeater {
+                        model: [
+                            { title: "grew since " + (storage.grownSince || "last scan"), empty: storage.grownSince === "" ? "rescan later to see what grows." : "nothing grew by more than 256 mb.", rows: storage.grown, stale: false },
+                            { title: "big, untouched 6+ months", empty: "no file over 1 gb has sat untouched that long.", rows: storage.stale, stale: true }
+                        ]
+                        Panel {
+                            required property var modelData
+                            width: (storagePage.width - 12) / 2
+                            title: modelData.title
+                            Repeater {
+                                model: Math.min(4, modelData.rows.length)
+                                Item {
+                                    required property int index
+                                    readonly property var row: modelData.rows[index]
+                                    width: (storagePage.width - 12) / 2 - 28
+                                    height: 18
+                                    PlainText {
+                                        width: parent.width - sizeText.width - 10
+                                        anchors.verticalCenter: parent.verticalCenter
+                                        text: row.path
+                                        color: insightArea.containsMouse ? theme.accent : theme.foreground
                                         font.pixelSize: 12
-                                        font.underline: spotArea.containsMouse
-                                        MouseArea {
-                                            id: spotArea
-                                            anchors.fill: parent
-                                            anchors.margins: -4
-                                            hoverEnabled: true
-                                            cursorShape: Qt.PointingHandCursor
-                                            onClicked: modelData === "empty" ? win.askToEmptyTrash(spot.size) : storage.revealSpot(index)
-                                        }
+                                        elide: Text.ElideMiddle
+                                    }
+                                    PlainText {
+                                        id: sizeText
+                                        anchors { right: parent.right; verticalCenter: parent.verticalCenter }
+                                        text: row.size + (modelData.stale ? "  " + row.age : "")
+                                        color: modelData.stale ? theme.secondary : theme.warn
+                                        font.pixelSize: 12
+                                    }
+                                    MouseArea {
+                                        id: insightArea
+                                        anchors.fill: parent
+                                        hoverEnabled: true
+                                        cursorShape: Qt.PointingHandCursor
+                                        onClicked: modelData.stale ? storage.revealStale(index) : storage.revealGrown(index)
                                     }
                                 }
                             }
+                            PlainText {
+                                visible: modelData.rows.length === 0
+                                text: modelData.empty
+                                color: theme.muted
+                                font.pixelSize: 11
+                            }
                         }
-                    }
-                    Text {
-                        visible: storage.spots.length === 0
-                        text: storage.scanning ? "measuring…" : "nothing measured yet. press r to scan."
-                        color: theme.muted
-                        font.pixelSize: 12
                     }
                 }
 
@@ -910,13 +1012,13 @@ Window {
                 Item {
                     width: parent.width
                     height: 18
-                    Text {
+                    PlainText {
                         text: "biggest in " + storage.place
                         color: theme.muted
                         font.pixelSize: 11
                         font.letterSpacing: 1
                     }
-                    Text {
+                    PlainText {
                         anchors.right: parent.right
                         text: (storage.atTop ? "" : "⌫ back  ·  ") + "enter go in  ·  o open"
                         color: theme.muted
@@ -940,7 +1042,7 @@ Window {
                     height: 24
                     color: selected || entryArea.containsMouse ? theme.bar : "transparent"
                     Rectangle { visible: entryRow.selected; width: 2; height: parent.height; color: theme.accent }
-                    Text {
+                    PlainText {
                         x: 12
                         width: parent.width * 0.42
                         anchors.verticalCenter: parent.verticalCenter
@@ -963,7 +1065,7 @@ Window {
                             color: entryRow.entry.other ? theme.muted : theme.accent
                         }
                     }
-                    Text {
+                    PlainText {
                         anchors { right: parent.right; rightMargin: 56; verticalCenter: parent.verticalCenter }
                         text: entryRow.entry.size
                         color: theme.foreground
@@ -976,7 +1078,7 @@ Window {
                         onClicked: win.storageIndex = entryRow.index
                         onDoubleClicked: win.enterFolder(entryRow.index)
                     }
-                    Text {
+                    PlainText {
                         anchors { right: parent.right; rightMargin: 10; verticalCenter: parent.verticalCenter }
                         visible: !entryRow.entry.other && (entryRow.selected || entryArea.containsMouse)
                         text: "open"
@@ -993,7 +1095,7 @@ Window {
                         }
                     }
                 }
-                Text {
+                PlainText {
                     visible: storage.entries.length === 0
                     topPadding: 12
                     leftPadding: 12
@@ -1011,7 +1113,7 @@ Window {
             height: 30
             color: theme.bar
             Rectangle { anchors { left: parent.left; right: parent.right; top: parent.top } height: 1; color: theme.line }
-            Text {
+            PlainText {
                 anchors { left: parent.left; leftMargin: 18; verticalCenter: parent.verticalCenter }
                 text: win.searching ? "type to find · ↑↓ pick · enter done · esc clear"
                     : win.page === "details" ? "tab next page · / find · ↑↓ pick · x end"
@@ -1020,7 +1122,7 @@ Window {
                 color: theme.muted
                 font.pixelSize: 11
             }
-            Text {
+            PlainText {
                 anchors { right: parent.right; rightMargin: 18; verticalCenter: parent.verticalCenter }
                 text: "? keys · esc close"
                 color: theme.muted
@@ -1028,7 +1130,7 @@ Window {
             }
         }
 
-        // Ending or deleting can't be taken back, so it asks first.
+        // Ending can't be taken back, so it asks first.
         Rectangle {
             anchors.fill: parent
             anchors.margins: 1
@@ -1046,16 +1148,15 @@ Window {
                 Column {
                     anchors { left: parent.left; right: parent.right; verticalCenter: parent.verticalCenter; margins: 26 }
                     spacing: 8
-                    Text {
+                    PlainText {
                         width: parent.width
                         elide: Text.ElideRight
-                        text: win.confirmKind === "trash" ? "empty the trash?" : "end " + win.confirmName + "?"
+                        text: "end " + win.confirmName + "?"
                         color: theme.foreground
                         font.pixelSize: 16
                     }
-                    Text {
-                        text: win.confirmKind === "trash" ? "this deletes " + win.confirmName + " for good. it can't be undone."
-                                                          : "anything unsaved in it may be lost."
+                    PlainText {
+                        text: "anything unsaved in it may be lost."
                         color: theme.secondary
                         font.pixelSize: 12
                     }
@@ -1063,11 +1164,9 @@ Window {
                     Row {
                         spacing: 18
                         Repeater {
-                            model: win.confirmKind === "trash"
-                                   ? [{ label: "y  empty it", force: false, cancel: false }, { label: "esc  keep it", force: false, cancel: true }]
-                                   : [{ label: "y  end it", force: false, cancel: false }, { label: "f  force", force: true, cancel: false },
-                                      { label: "esc  keep it", force: false, cancel: true }]
-                            Text {
+                            model: [{ label: "y  end it", force: false, cancel: false }, { label: "f  force", force: true, cancel: false },
+                                    { label: "esc  keep it", force: false, cancel: true }]
+                            PlainText {
                                 required property var modelData
                                 text: modelData.label
                                 color: choiceArea.containsMouse ? theme.accent : modelData.force ? theme.warn : theme.secondary
@@ -1087,6 +1186,84 @@ Window {
             }
         }
 
+        // Free up space: everything it would clear, measured, before the click.
+        Rectangle {
+            anchors.fill: parent
+            anchors.margins: 1
+            visible: win.cleaning
+            color: Qt.rgba(0, 0, 0, theme.dark ? 0.55 : 0.25)
+            MouseArea { anchors.fill: parent; onClicked: win.cleaning = cleanup.busy }
+            Rectangle {
+                anchors.centerIn: parent
+                width: 560
+                height: sheet.implicitHeight + 48
+                color: theme.background
+                border.color: theme.accent
+                radius: Math.min(6, theme.radius)
+                MouseArea { anchors.fill: parent }
+                Column {
+                    id: sheet
+                    x: 24; y: 24
+                    width: parent.width - 48
+                    spacing: 10
+                    PlainText { text: "free up space"; color: theme.foreground; font.pixelSize: 18; font.weight: Font.Medium }
+                    PlainText {
+                        width: parent.width
+                        wrapMode: Text.WordWrap
+                        text: cleanup.busy && cleanup.items.length > 0 && cleanup.result === "" ? "working…"
+                              : "only places that are safe to clear. untick anything you'd rather keep."
+                        color: theme.secondary
+                        font.pixelSize: 12
+                    }
+                    Item { width: 1; height: 2 }
+                    Repeater {
+                        model: cleanup.items.length
+                        Item {
+                            required property int index
+                            readonly property var item: cleanup.items[index]
+                            width: sheet.width
+                            height: 36
+                            opacity: item.empty ? 0.5 : 1
+                            PlainText {
+                                id: tick
+                                y: 2
+                                text: item.selected ? "●" : "○"
+                                color: item.selected ? theme.accent : theme.muted
+                                font.pixelSize: 14
+                            }
+                            PlainText { x: 24; y: 0; text: item.label + (item.password ? "  <font color='" + theme.muted + "'>· password</font>" : ""); textFormat: Text.StyledText; color: theme.foreground; font.pixelSize: 13 }
+                            PlainText { x: 24; y: 18; width: parent.width - 150; text: item.note; color: theme.muted; font.pixelSize: 11; elide: Text.ElideRight }
+                            PlainText { anchors.right: parent.right; y: 0; text: item.size; color: item.empty ? theme.muted : theme.accent; font.pixelSize: 13 }
+                            MouseArea { anchors.fill: parent; enabled: !item.empty; cursorShape: Qt.PointingHandCursor; onClicked: cleanup.toggle(index) }
+                        }
+                    }
+                    Item { width: 1; height: 4 }
+                    Item {
+                        width: parent.width
+                        height: 32
+                        PlainText {
+                            anchors.verticalCenter: parent.verticalCenter
+                            width: parent.width - cleanButton.width - 16
+                            wrapMode: Text.WordWrap
+                            text: cleanup.result !== "" ? cleanup.result : cleanup.busy ? "measuring…" : "esc to close"
+                            color: cleanup.result !== "" ? theme.good : theme.muted
+                            font.pixelSize: 12
+                        }
+                        Rectangle {
+                            id: cleanButton
+                            anchors.right: parent.right
+                            width: cleanText.implicitWidth + 28
+                            height: 32
+                            radius: Math.min(6, theme.radius)
+                            color: cleanup.busy ? theme.line : cleanArea.containsMouse ? Qt.darker(theme.accent, 1.1) : theme.accent
+                            PlainText { id: cleanText; anchors.centerIn: parent; text: cleanup.busy ? "…" : "clean " + cleanup.total + "  ⏎"; color: cleanup.busy ? theme.muted : theme.onAccent; font.pixelSize: 12 }
+                            MouseArea { id: cleanArea; anchors.fill: parent; enabled: !cleanup.busy; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: cleanup.clean() }
+                        }
+                    }
+                }
+            }
+        }
+
         Rectangle {
             anchors.fill: parent
             anchors.margins: 1
@@ -1096,7 +1273,7 @@ Window {
             Column {
                 anchors.centerIn: parent
                 spacing: 5
-                Text { text: "keys"; color: theme.accent; font.pixelSize: 13; font.letterSpacing: 1; bottomPadding: 8 }
+                PlainText { text: "keys"; color: theme.accent; font.pixelSize: 13; font.letterSpacing: 1; bottomPadding: 8 }
                 Repeater {
                     model: [
                         ["tab", "overview → details → storage"],
@@ -1110,14 +1287,16 @@ Window {
                         ["x  del", "end the picked process"],
                         ["c", "sort processes by cpu"],
                         ["enter  ⌫", "into a folder · back out (storage)"],
-                        ["o  r", "open in files · rescan (storage)"],
+                        ["o  r  f", "open in files · rescan · free up space (storage)"],
+                        ["v", "busiest now / heaviest since opened"],
+                        ["p", "battery care: stop charging at 80%"],
                         ["t", "light / dark for now"],
                         ["esc  q", "close keel"]
                     ]
                     Row {
                         required property var modelData
-                        Text { width: 130; text: modelData[0]; color: theme.foreground; font.pixelSize: 13 }
-                        Text { text: modelData[1]; color: theme.secondary; font.pixelSize: 13 }
+                        PlainText { width: 130; text: modelData[0]; color: theme.foreground; font.pixelSize: 13 }
+                        PlainText { text: modelData[1]; color: theme.secondary; font.pixelSize: 13 }
                     }
                 }
             }

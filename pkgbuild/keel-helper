@@ -1,0 +1,78 @@
+#!/bin/sh
+# Keel's only steps that need the administrator password, run through pkexec
+# with the prompt from /usr/share/polkit-1/actions/dev.keel.helper.policy.
+# It accepts exactly these forms and refuses anything else:
+#
+#   keel-helper clean-system packages|logs [packages|logs]
+#   keel-helper battery-care on|off
+set -eu
+PATH=/usr/bin:/bin
+
+usage() {
+  echo "usage: keel-helper clean-system packages|logs ... | battery-care on|off" >&2
+  exit 2
+}
+
+[ $# -ge 1 ] || usage
+
+case "$1" in
+  clean-system)
+    shift
+    [ $# -ge 1 ] || usage
+    for step in "$@"; do
+      case "$step" in packages | logs) ;; *) usage ;; esac
+    done
+    status=0
+    for step in "$@"; do
+      case "$step" in
+        # Keeps the last two versions of each installed package, so a
+        # downgrade is still possible, and drops uninstalled ones.
+        packages)
+          paccache -q -rk2 || status=1
+          paccache -q -ruk0 || status=1
+          ;;
+        logs) journalctl -q --vacuum-time=2weeks || status=1 ;;
+      esac
+    done
+    exit "$status"
+    ;;
+
+  battery-care)
+    [ $# -eq 2 ] || usage
+    case "$2" in on | off) ;; *) usage ;; esac
+    battery=""
+    for dir in /sys/class/power_supply/BAT*; do
+      if [ -e "$dir/charge_control_end_threshold" ]; then
+        battery=$dir
+        break
+      fi
+    done
+    if [ -z "$battery" ]; then
+      echo "keel-helper: no battery with a charge limit" >&2
+      exit 1
+    fi
+    name=$(basename "$battery")
+    case "$name" in BAT[0-9] | BAT[0-9][0-9]) ;; *) exit 1 ;; esac
+    rule=/etc/udev/rules.d/99-battery-charge-threshold.rules
+    if [ "$2" = on ]; then
+      # The rule makes the limit survive restarts.
+      printf 'SUBSYSTEM=="power_supply", KERNEL=="%s", ATTR{charge_control_end_threshold}="80", ATTR{charge_control_start_threshold}="75"\n' "$name" >"$rule"
+      rm -f "$rule.disabled"
+      # Start before end: the kernel keeps start below end at every step.
+      if [ -e "$battery/charge_control_start_threshold" ]; then
+        echo 75 >"$battery/charge_control_start_threshold"
+      fi
+      echo 80 >"$battery/charge_control_end_threshold"
+    else
+      if [ -e "$rule" ]; then
+        mv -f "$rule" "$rule.disabled"
+      fi
+      echo 100 >"$battery/charge_control_end_threshold"
+      if [ -e "$battery/charge_control_start_threshold" ]; then
+        echo 0 >"$battery/charge_control_start_threshold"
+      fi
+    fi
+    ;;
+
+  *) usage ;;
+esac

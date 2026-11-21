@@ -55,32 +55,30 @@ QString friendlyName(const QString &appClass) {
 }
 
 bool isEssential(const QString &comm) {
-    static const QSet<QString> names{"uwsm",
-                                     "Hyprland",
-                                     "Xwayland",
-                                     "dbus-broker",
-                                     "dbus-broker-lau",
-                                     "dbus-daemon",
-                                     "pipewire",
-                                     "pipewire-pulse",
-                                     "wireplumber",
-                                     "quickshell",
-                                     "qs",
-                                     "hypridle",
-                                     "hyprsunset",
-                                     "hyprlock",
-                                     "xdg-desktop-por",
-                                     "gnome-keyring-d",
-                                     "fcitx5",
-                                     "elephant",
-                                     "walker",
-                                     "mako",
-                                     "swayosd-server",
-                                     "polkit-gnome-au",
-                                     "keel",
-                                     "sddm",
-                                     "login"};
-    return names.contains(comm) || comm.startsWith("systemd") || comm.startsWith("uwsm");
+    // Names as the kernel shows them (at most 15 characters).
+    static const QSet<QString> names{"uwsm",           "start-hyprland",
+                                     "Hyprland",       "hyprland",
+                                     "Xwayland",       "(sd-pam)",
+                                     "dbus-broker",    "dbus-broker-lau",
+                                     "dbus-daemon",    "pipewire",
+                                     "pipewire-pulse", "wireplumber",
+                                     "quickshell",     "qs",
+                                     "hypridle",       "hyprsunset",
+                                     "hyprlock",       "gnome-keyring-d",
+                                     "fcitx5",         "elephant",
+                                     "walker",         "mako",
+                                     "swayosd-server", "polkit-gnome-au",
+                                     "keel",           "sddm",
+                                     "login",          "seatd",
+                                     "greetd",         "ssh-agent",
+                                     "gpg-agent"};
+    static const QStringList prefixes{"systemd",         "uwsm",           "omarchy-",       "gvfs",
+                                      "xdg-desktop-por", "xdg-document-p", "xdg-permission", "at-spi",
+                                      "hyprpolkit"};
+    if (names.contains(comm))
+        return true;
+    return std::any_of(prefixes.cbegin(), prefixes.cend(),
+                       [&](const QString &prefix) { return comm.startsWith(prefix); });
 }
 
 QString groupKey(const Process &process) {
@@ -91,13 +89,15 @@ QString groupKey(const Process &process) {
 }
 
 QList<Usage> rank(const QHash<int, Process> &before, const QHash<int, Process> &now,
-                  quint64 totalTicksElapsed, quint64 pageSize, const QList<Window> &windows, int limit) {
+                  quint64 totalTicksElapsed, quint64 pageSize, const QList<Window> &windows, int limit,
+                  bool byLifetime, double ticksPerSecond) {
     struct Group {
-        quint64 ticks = 0, pages = 0;
+        quint64 ticks = 0, pages = 0, lifetime = 0;
         QString comm;
         QString appClass;
         QStringList windows;
         QList<int> pids;
+        QList<quint64> starts;
         bool essential = false;
     };
     QHash<QString, Group> groups;
@@ -109,7 +109,9 @@ QList<Usage> rank(const QHash<int, Process> &before, const QHash<int, Process> &
         if (previous != before.constEnd() && previous->program == it->program && it->ticks >= previous->ticks)
             group.ticks += it->ticks - previous->ticks;
         group.pages += it->rssPages;
+        group.lifetime += it->ticks;
         group.pids.append(it.key());
+        group.starts.append(it->start);
         if (group.comm.isEmpty())
             group.comm = it->comm;
     }
@@ -132,7 +134,9 @@ QList<Usage> rank(const QHash<int, Process> &before, const QHash<int, Process> &
         usage.memoryBytes = it->pages * pageSize;
         usage.windows = it->windows;
         usage.pids = it->pids;
+        usage.starts = it->starts;
         usage.essential = it->essential;
+        usage.cpuSeconds = ticksPerSecond > 0 ? double(it->lifetime) / ticksPerSecond : 0;
         usages.append(usage);
     }
     // A background program can share its name with an app (Claude's window
@@ -147,7 +151,9 @@ QList<Usage> rank(const QHash<int, Process> &before, const QHash<int, Process> &
 
     // Processor use first; memory breaks ties, which matters when the
     // machine is idle and every app reads 0%.
-    std::sort(usages.begin(), usages.end(), [](const Usage &a, const Usage &b) {
+    std::sort(usages.begin(), usages.end(), [byLifetime](const Usage &a, const Usage &b) {
+        if (byLifetime)
+            return a.cpuSeconds > b.cpuSeconds;
         if (qAbs(a.cpu - b.cpu) >= 0.5)
             return a.cpu > b.cpu;
         return a.memoryBytes > b.memoryBytes;
@@ -169,6 +175,7 @@ QList<ProcessUsage> topProcesses(const QHash<int, Process> &before, const QHash<
             continue;
         ProcessUsage row;
         row.pid = it.key();
+        row.start = it->start;
         row.name = it->comm;
         const auto previous = before.constFind(it.key());
         if (previous != before.constEnd() && previous->program == it->program &&
@@ -193,15 +200,18 @@ QList<ProcessUsage> topProcesses(const QHash<int, Process> &before, const QHash<
     return rows;
 }
 
-bool endProcess(int pid, bool force) {
+bool endProcess(int pid, quint64 start, bool force) {
     if (pid <= 1 || pid == int(QCoreApplication::applicationPid()))
         return false;
     const QString base = "/proc/" + QString::number(pid);
     if (QFileInfo(base).ownerId() != getuid())
         return false;
+    QFile stat(base + "/stat");
+    Process now;
+    if (!stat.open(QIODevice::ReadOnly) || !parseStat(stat.readAll(), now) || now.start != start)
+        return false; // Gone, or the pid now belongs to another process.
     // Checked here as well as in the window, so no path can end the session.
-    QFile comm(base + "/comm");
-    if (!comm.open(QIODevice::ReadOnly) || isEssential(QString::fromUtf8(comm.readAll().trimmed())))
+    if (isEssential(now.comm))
         return false;
     return kill(pid, force ? SIGKILL : SIGTERM) == 0;
 }

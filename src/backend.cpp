@@ -27,6 +27,16 @@ QVariantMap meter(const QString &label, double level, const QString &word, const
     return {{"label", label}, {"level", qBound(0.0, level, 1.0)}, {"word", word}, {"detail", detail}};
 }
 
+// [pid, start] pairs for the window to hand back when the user confirms.
+// The start time travels as text: it can exceed what a JavaScript number
+// holds exactly.
+QVariantList targetsOf(const QList<int> &pids, const QList<quint64> &starts) {
+    QVariantList list;
+    for (qsizetype i = 0; i < pids.size() && i < starts.size(); ++i)
+        list.append(QVariant(QVariantList{pids[i], QString::number(starts[i])}));
+    return list;
+}
+
 QVariantMap row(const QString &label, const QString &value) { return {{"label", label}, {"value", value}}; }
 
 QVariantMap section(const QString &title, const QVariantList &rows) {
@@ -147,6 +157,14 @@ void Backend::sample() {
     m_procs = apps::readProcesses(m_procs);
     const QList<apps::Window> windows = apps::parseClients(hyprland::request("j/clients"));
     m_usages = apps::rank(m_previousProcs, m_procs, m_ticksElapsed, m_pageSize, windows, 3);
+    static const double ticksPerSecond = double(sysconf(_SC_CLK_TCK));
+    m_heavy.clear();
+    for (const apps::Usage &usage :
+         apps::rank(m_previousProcs, m_procs, m_ticksElapsed, m_pageSize, windows, 3, true, ticksPerSecond))
+        m_heavy.append(
+            QVariantMap{{"name", usage.name},
+                        {"detail", vitals::durationText(int(usage.cpuSeconds / 60)) + " of processor"},
+                        {"seconds", usage.cpuSeconds}});
     m_apps.clear();
     for (const apps::Usage &usage : m_usages)
         m_apps.append(QVariantMap{
@@ -155,7 +173,9 @@ void Backend::sample() {
             {"detail",
              QString("%1% · %2").arg(qRound(usage.cpu)).arg(vitals::bytesText(double(usage.memoryBytes)))},
             {"canQuit", !usage.windows.isEmpty() && !usage.essential},
-            {"canEnd", !usage.essential}});
+            {"canEnd", !usage.essential},
+            {"windows", usage.windows},
+            {"targets", targetsOf(usage.pids, usage.starts)}});
 
     // The details page costs a little more to read, so it is only read while
     // it is showing.
@@ -236,7 +256,8 @@ void Backend::publishProcesses() {
                                          {"name", process.name},
                                          {"cpu", QString("%1%").arg(process.cpu, 0, 'f', 1)},
                                          {"memory", vitals::bytesText(double(process.memoryBytes))},
-                                         {"essential", process.essential}});
+                                         {"essential", process.essential},
+                                         {"targets", targetsOf({process.pid}, {process.start})}});
 }
 
 void Backend::setSortByMemory(bool byMemory) {
@@ -264,25 +285,22 @@ void Backend::setDetailed(bool detailed) {
     emit detailsSampled();
 }
 
-bool Backend::quitApp(int index) {
-    if (index < 0 || index >= m_usages.size() || m_usages[index].windows.isEmpty())
-        return false;
-    for (const QString &address : m_usages[index].windows)
-        if (!hyprland::closeWindow(address))
-            return false;
-    return true;
+bool Backend::closeWindows(const QStringList &addresses) {
+    bool all = !addresses.isEmpty();
+    for (const QString &address : addresses)
+        all = hyprland::closeWindow(address) && all;
+    return all;
 }
 
-bool Backend::endApp(int index, bool force) {
-    if (index < 0 || index >= m_usages.size())
-        return false;
+bool Backend::endProcesses(const QVariantList &targets, bool force) {
     bool any = false;
-    for (int pid : m_usages[index].pids)
-        any = apps::endProcess(pid, force) || any;
+    for (const QVariant &target : targets) {
+        const QVariantList pair = target.toList();
+        if (pair.size() == 2)
+            any = apps::endProcess(pair[0].toInt(), pair[1].toString().toULongLong(), force) || any;
+    }
     return any;
 }
-
-bool Backend::endProcess(int pid, bool force) { return apps::endProcess(pid, force); }
 
 void Backend::setFilter(const QString &filter) {
     if (filter == m_filter)

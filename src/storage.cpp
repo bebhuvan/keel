@@ -10,6 +10,7 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QSaveFile>
+#include <QSet>
 #include <QStandardPaths>
 #include <QUrl>
 #include <algorithm>
@@ -19,6 +20,7 @@
 #include <fcntl.h>
 #include <mutex>
 #include <set>
+#include <sys/resource.h>
 #include <sys/stat.h>
 #include <sys/statvfs.h>
 #include <unistd.h>
@@ -38,10 +40,17 @@ bool isDots(const char *name) { return name[0] == '.' && (name[1] == 0 || (name[
 // Deeper folders are walked within the task that found them.
 constexpr int splitDepth = 5;
 
+// Each level of folders being walked holds one open handle, and the walk
+// recurses, so an absurdly deep tree (tens of thousands of levels, which
+// only a script makes) would exhaust handles or the stack. Below this depth
+// folders are counted but not entered.
+constexpr int maxDepth = 512;
+
 // A folder near the top while the scan runs. Its subfolders that became
 // tasks are kept apart from what was walked inline, and summed at the end.
 struct Folder {
     QString name;
+    QString path; // relative to the scanned folder
     int depth = 0;
     quint64 own = 0;
     QList<Node> kept;
@@ -54,6 +63,16 @@ struct Shared {
     quint64 keepMin = 0;
     Progress *progress = nullptr;
 
+    // Anything mounted inside the scanned folder: a network drive whose
+    // server has gone can hang any look at it, so these are skipped by name
+    // before they're touched. Keyed by the folder that holds them.
+    QHash<QString, QSet<QByteArray>> mountsIn;
+
+    bool isMount(const QString &where, const char *name) const {
+        const auto it = mountsIn.constFind(where);
+        return it != mountsIn.constEnd() && it->contains(QByteArray(name));
+    }
+
     std::mutex lock;
     std::condition_variable wake;
     std::deque<std::pair<Folder *, int>> queue;
@@ -63,6 +82,15 @@ struct Shared {
     // it has, so it is counted at the first name met.
     std::mutex linksLock;
     std::set<std::pair<dev_t, ino_t>> links;
+
+    // Notes a big, long-unchanged file. The path is only built for these.
+    void maybeStale(const struct stat &info, quint64 size, const QString &where, const char *name) {
+        if (!progress->staleMin || size < progress->staleMin || info.st_mtime >= progress->staleBefore)
+            return;
+        const QString file = QString::fromLocal8Bit(name);
+        std::lock_guard guard(progress->staleLock);
+        progress->stale.append({where.isEmpty() ? file : where + "/" + file, size, qint64(info.st_mtime)});
+    }
 
     bool firstSight(const struct stat &info) {
         if (info.st_nlink < 2 || S_ISDIR(info.st_mode))
@@ -74,7 +102,7 @@ struct Shared {
 
 // Walks a folder entirely within this thread. Plain system calls on directory
 // handles (openat, fstatat): no path strings per file, no links followed.
-void walkInline(int fd, int depth, Node &node, Shared &shared) {
+void walkInline(int fd, int depth, const QString &where, Node &node, Shared &shared) {
     DIR *dir = fdopendir(fd);
     if (!dir) {
         close(fd);
@@ -85,7 +113,7 @@ void walkInline(int fd, int depth, Node &node, Shared &shared) {
     while (const dirent *entry = readdir(dir)) {
         if (shared.progress->cancel.load(std::memory_order_relaxed))
             break;
-        if (isDots(entry->d_name))
+        if (isDots(entry->d_name) || shared.isMount(where, entry->d_name))
             continue;
         struct stat info{};
         if (fstatat(handle, entry->d_name, &info, AT_SYMLINK_NOFOLLOW) != 0 || !shared.firstSight(info))
@@ -93,20 +121,21 @@ void walkInline(int fd, int depth, Node &node, Shared &shared) {
         const quint64 size = quint64(info.st_blocks) * 512;
         node.bytes += size;
         if (S_ISDIR(info.st_mode)) {
-            if (info.st_dev != shared.device)
-                continue; // Another disk mounted inside; it isn't this disk's space.
+            if (info.st_dev != shared.device || depth >= maxDepth)
+                continue; // Another disk mounted inside, or too deep to enter.
             const int child = openat(handle, entry->d_name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
             if (child < 0)
                 continue;
             Node sub;
             sub.name = QString::fromLocal8Bit(entry->d_name);
             sub.directory = true;
-            walkInline(child, depth + 1, sub, shared);
+            walkInline(child, depth + 1, where + "/" + sub.name, sub, shared);
             node.bytes += sub.bytes;
             if (node.detailed && sub.bytes >= shared.keepMin)
                 node.children.append(std::move(sub));
         } else {
             shared.progress->files.fetch_add(1, std::memory_order_relaxed);
+            shared.maybeStale(info, size, where, entry->d_name);
             if (node.detailed && size >= shared.keepMin)
                 node.children.append({QString::fromLocal8Bit(entry->d_name), size, false, true, {}});
         }
@@ -128,7 +157,7 @@ void runTask(Folder &folder, int fd, Shared &shared) {
     while (const dirent *entry = readdir(dir)) {
         if (shared.progress->cancel.load(std::memory_order_relaxed))
             break;
-        if (isDots(entry->d_name))
+        if (isDots(entry->d_name) || shared.isMount(folder.path, entry->d_name))
             continue;
         struct stat info{};
         if (fstatat(handle, entry->d_name, &info, AT_SYMLINK_NOFOLLOW) != 0 || !shared.firstSight(info))
@@ -137,6 +166,7 @@ void runTask(Folder &folder, int fd, Shared &shared) {
         folder.own += size;
         if (!S_ISDIR(info.st_mode)) {
             shared.progress->files.fetch_add(1, std::memory_order_relaxed);
+            shared.maybeStale(info, size, folder.path, entry->d_name);
             if (keep && size >= shared.keepMin)
                 folder.kept.append({QString::fromLocal8Bit(entry->d_name), size, false, true, {}});
             continue;
@@ -150,6 +180,7 @@ void runTask(Folder &folder, int fd, Shared &shared) {
             auto sub = std::make_unique<Folder>();
             sub->name = QString::fromLocal8Bit(entry->d_name);
             sub->depth = folder.depth + 1;
+            sub->path = folder.path.isEmpty() ? sub->name : folder.path + "/" + sub->name;
             Folder *task = sub.get();
             folder.folders.push_back(std::move(sub));
             std::lock_guard guard(shared.lock);
@@ -159,7 +190,8 @@ void runTask(Folder &folder, int fd, Shared &shared) {
             Node sub;
             sub.name = QString::fromLocal8Bit(entry->d_name);
             sub.directory = true;
-            walkInline(child, folder.depth + 1, sub, shared);
+            walkInline(child, folder.depth + 1,
+                       folder.path.isEmpty() ? sub.name : folder.path + "/" + sub.name, sub, shared);
             folder.own += sub.bytes;
             if (keep && sub.bytes >= shared.keepMin)
                 folder.kept.append(std::move(sub));
@@ -207,6 +239,37 @@ Node assemble(Folder &folder, const Shared &shared) {
     return node;
 }
 
+// Mount points below `root`, from /proc/self/mountinfo (field 5, with
+// spaces and the like escaped as \ooo), grouped by their parent folder.
+QHash<QString, QSet<QByteArray>> mountsInside(const QByteArray &root) {
+    QHash<QString, QSet<QByteArray>> mounts;
+    QFile file("/proc/self/mountinfo");
+    if (!file.open(QIODevice::ReadOnly))
+        return mounts;
+    for (const QByteArray &line : file.readAll().split('\n')) {
+        const QList<QByteArray> fields = line.split(' ');
+        if (fields.size() < 5)
+            continue;
+        QByteArray point;
+        const QByteArray &raw = fields[4];
+        for (qsizetype i = 0; i < raw.size(); ++i) {
+            if (raw[i] == '\\' && i + 3 < raw.size()) {
+                point.append(char(raw.mid(i + 1, 3).toInt(nullptr, 8)));
+                i += 3;
+            } else {
+                point.append(raw[i]);
+            }
+        }
+        if (!point.startsWith(root + "/"))
+            continue;
+        const QByteArray relative = point.mid(root.size() + 1);
+        const qsizetype slash = relative.lastIndexOf('/');
+        mounts[slash < 0 ? QString() : QString::fromLocal8Bit(relative.left(slash))].insert(
+            relative.mid(slash + 1));
+    }
+    return mounts;
+}
+
 } // namespace
 
 Node scan(const QString &path, int keepDepth, quint64 keepMinBytes, Progress &progress) {
@@ -220,8 +283,17 @@ Node scan(const QString &path, int keepDepth, quint64 keepMinBytes, Progress &pr
         empty.directory = true;
         return empty;
     }
+    // Up to 16 threads each hold a handle per level; the usual soft limit of
+    // 1024 open files is too low for that, so raise it toward the hard limit.
+    struct rlimit files{};
+    if (getrlimit(RLIMIT_NOFILE, &files) == 0 && files.rlim_cur < files.rlim_max) {
+        files.rlim_cur = qMin<rlim_t>(files.rlim_max, 65536);
+        setrlimit(RLIMIT_NOFILE, &files);
+    }
+
     Shared shared;
     shared.device = self.st_dev;
+    shared.mountsIn = mountsInside(QFile::encodeName(QDir::cleanPath(path)));
     shared.keepDepth = keepDepth;
     shared.keepMin = keepMinBytes;
     shared.progress = &progress;
@@ -237,6 +309,48 @@ Node scan(const QString &path, int keepDepth, quint64 keepMinBytes, Progress &pr
     for (std::thread &thread : pool)
         thread.join();
     return assemble(root, shared);
+}
+
+namespace {
+void flattenInto(const Node &node, const QString &path, int depth, int maxDepth,
+                 QHash<QString, quint64> &out) {
+    for (const Node &child : node.children) {
+        if (!child.directory)
+            continue;
+        const QString here = path.isEmpty() ? child.name : path + "/" + child.name;
+        out.insert(here, child.bytes);
+        if (depth < maxDepth)
+            flattenInto(child, here, depth + 1, maxDepth, out);
+    }
+}
+} // namespace
+
+QHash<QString, quint64> flatten(const Node &root, int maxDepth) {
+    QHash<QString, quint64> out;
+    flattenInto(root, {}, 1, maxDepth, out);
+    return out;
+}
+
+QList<Growth> growth(const QHash<QString, quint64> &before, const QHash<QString, quint64> &after,
+                     quint64 minDelta, int limit) {
+    QList<Growth> grew;
+    for (auto it = after.begin(); it != after.end(); ++it) {
+        const auto old = before.constFind(it.key());
+        if (old != before.constEnd() && it.value() >= *old + minDelta)
+            grew.append({it.key(), qint64(it.value() - *old)});
+    }
+    QList<Growth> kept;
+    for (const Growth &candidate : grew) {
+        const bool explainedInside = std::any_of(grew.cbegin(), grew.cend(), [&](const Growth &other) {
+            return other.path.startsWith(candidate.path + "/") && other.delta * 10 >= candidate.delta * 8;
+        });
+        if (!explainedInside)
+            kept.append(candidate);
+    }
+    std::sort(kept.begin(), kept.end(), [](const Growth &a, const Growth &b) { return a.delta > b.delta; });
+    if (kept.size() > limit)
+        kept.resize(limit);
+    return kept;
 }
 
 const Node *find(const Node &root, const QStringList &names) {
@@ -315,8 +429,11 @@ Storage::Storage(const QString &home, const QString &cacheFile, QObject *parent)
 Storage::~Storage() {
     if (m_progress)
         m_progress->cancel = true;
+    // A scan stuck on a hung disk must not keep Keel alive after its window
+    // closes. The thread checks the cancel flag before touching this object,
+    // and the process is exiting, so letting it go is safe.
     if (m_worker && m_worker->joinable())
-        m_worker->join();
+        m_worker->detach();
 }
 
 QString Storage::pathOf(const QStringList &trail) const {
@@ -413,6 +530,15 @@ void Storage::open() {
             m_root = storage::fromJson(saved.value("root").toObject());
             m_scannedAt = qint64(saved.value("at").toDouble());
             m_spots = saved.value("spots").toArray().toVariantList();
+            m_previousAt = qint64(saved.value("previousAt").toDouble());
+            const QJsonObject previous = saved.value("previous").toObject();
+            for (auto it = previous.begin(); it != previous.end(); ++it)
+                m_previous.insert(it.key(), quint64(qMax(0.0, it.value().toDouble())));
+            for (const QJsonValue &value : saved.value("stale").toArray()) {
+                const QJsonObject file = value.toObject();
+                m_stale.append({file.value("p").toString(), quint64(qMax(0.0, file.value("b").toDouble())),
+                                qint64(file.value("m").toDouble())});
+            }
             m_loaded = true;
             emit changed();
             return;
@@ -431,27 +557,50 @@ void Storage::startScan(const QStringList &trail) {
         return;
     m_scanTrail = trail;
     m_progress = std::make_shared<storage::Progress>();
+    if (trail.isEmpty()) {
+        // Files of a gigabyte or more, unchanged for six months.
+        m_progress->staleMin = 1ull << 30;
+        m_progress->staleBefore = QDateTime::currentSecsSinceEpoch() - 182 * 86400;
+    }
     const QString path = pathOf(trail);
     auto progress = m_progress;
     m_worker = std::make_unique<std::thread>([this, path, trail, progress] {
         storage::Node node = storage::scan(path, keepDepth, keepMin, *progress);
         if (progress->cancel)
             return;
+        QList<storage::StaleFile> stale;
+        {
+            std::lock_guard guard(progress->staleLock);
+            stale = progress->stale;
+        }
         QMetaObject::invokeMethod(
-            this, [this, trail, node = std::move(node)]() mutable { finished(trail, std::move(node)); },
+            this,
+            [this, trail, node = std::move(node), stale]() mutable {
+                finished(trail, std::move(node), stale);
+            },
             Qt::QueuedConnection);
     });
     m_tick.start();
     emit changed();
 }
 
-void Storage::finished(const QStringList &trail, storage::Node node) {
+void Storage::finished(const QStringList &trail, storage::Node node, QList<storage::StaleFile> stale) {
     m_worker->join();
     m_worker.reset();
     m_tick.stop();
     if (trail.isEmpty()) {
+        // The scan being replaced becomes the one "what grew" compares with.
+        if (m_loaded && m_scannedAt > 0) {
+            m_previous = storage::flatten(m_root, 3);
+            m_previousAt = m_scannedAt;
+        }
         m_root = std::move(node);
         m_scannedAt = QDateTime::currentMSecsSinceEpoch();
+        std::sort(stale.begin(), stale.end(),
+                  [](const storage::StaleFile &a, const storage::StaleFile &b) { return a.bytes > b.bytes; });
+        if (stale.size() > 8)
+            stale.resize(8);
+        m_stale = stale;
     } else if (storage::Node *target = const_cast<storage::Node *>(storage::find(m_root, trail))) {
         // A deeper scan of one folder: graft its detail into the tree,
         // keeping the folder's own name and adjusting nothing else.
@@ -469,33 +618,24 @@ void Storage::finished(const QStringList &trail, storage::Node node) {
 // live in the home folder, plus the system package cache.
 void Storage::buildSpots() {
     struct Spot {
-        QString label, path, note, action;
+        QString label, path;
     };
     const QList<Spot> places{
-        {"trash", ".local/share/Trash", "deleted files still taking space.", "empty"},
-        {"app caches", ".cache", "apps rebuild these, so clearing one is usually safe.", "open"},
-        {"downloads", "Downloads", "old installers and archives pile up here.", "open"},
-    };
+        {"trash", ".local/share/Trash"}, {"app caches", ".cache"}, {"downloads", "Downloads"}};
     m_spots.clear();
     for (const Spot &spot : places) {
         const storage::Node *node = storage::find(m_root, spot.path.split('/'));
         const QString size = node ? vitals::bytesText(double(node->bytes))
                                   : QString("under %1").arg(vitals::bytesText(double(keepMin)));
-        m_spots.append(QVariantMap{{"label", spot.label},
-                                   {"path", m_home + "/" + spot.path},
-                                   {"size", size},
-                                   {"note", spot.note},
-                                   {"action", spot.action}});
+        m_spots.append(
+            QVariantMap{{"label", spot.label}, {"path", m_home + "/" + spot.path}, {"size", size}});
     }
     const QString packages = "/var/cache/pacman/pkg";
     if (QFileInfo(packages).isReadable()) {
         storage::Progress progress;
         const storage::Node node = storage::scan(packages, 0, keepMin, progress);
-        m_spots.append(QVariantMap{{"label", "package cache"},
-                                   {"path", packages},
-                                   {"size", vitals::bytesText(double(node.bytes))},
-                                   {"note", "old package versions. 'paccache -rk1' trims it."},
-                                   {"action", "open"}});
+        m_spots.append(QVariantMap{
+            {"label", "package cache"}, {"path", packages}, {"size", vitals::bytesText(double(node.bytes))}});
     }
 }
 
@@ -504,11 +644,21 @@ void Storage::save() const {
     QSaveFile file(m_cacheFile);
     if (!file.open(QIODevice::WriteOnly))
         return;
+    QJsonObject previous;
+    for (auto it = m_previous.begin(); it != m_previous.end(); ++it)
+        previous.insert(it.key(), double(it.value()));
+    QJsonArray staleList;
+    for (const storage::StaleFile &file : m_stale)
+        staleList.append(
+            QJsonObject{{"p", file.path}, {"b", double(file.bytes)}, {"m", double(file.modified)}});
     const QJsonObject saved{{"version", 1},
                             {"home", m_home},
                             {"at", double(m_scannedAt)},
                             {"spots", QJsonArray::fromVariantList(m_spots)},
-                            {"root", storage::toJson(m_root)}};
+                            {"root", storage::toJson(m_root)},
+                            {"previousAt", double(m_previousAt)},
+                            {"previous", previous},
+                            {"stale", staleList}};
     file.write(QJsonDocument(saved).toJson(QJsonDocument::Compact));
     file.commit();
 }
@@ -541,42 +691,65 @@ void Storage::reveal(int index) {
     QDesktopServices::openUrl(QUrl::fromLocalFile(path));
 }
 
-void Storage::revealSpot(int index) {
-    if (index >= 0 && index < m_spots.size())
-        QDesktopServices::openUrl(QUrl::fromLocalFile(m_spots[index].toMap().value("path").toString()));
+QVariantList Storage::grown() const {
+    QVariantList list;
+    if (m_previous.isEmpty())
+        return list;
+    // At least 256 MB, so ordinary churn stays out of it.
+    for (const storage::Growth &grew :
+         storage::growth(m_previous, storage::flatten(m_root, 3), 256ull << 20, 5))
+        list.append(
+            QVariantMap{{"path", "~/" + grew.path}, {"size", "+" + vitals::bytesText(double(grew.delta))}});
+    return list;
 }
 
-bool Storage::emptyTrash() {
-    const QString trash = m_home + "/.local/share/Trash";
-    bool ok = true;
-    for (const char *part : {"files", "info", "expunged"}) {
-        QDir dir(trash + "/" + part);
-        if (dir.exists())
-            ok = dir.removeRecursively() && ok;
-    }
-    QDir().mkpath(trash + "/files");
-    QDir().mkpath(trash + "/info");
+QString Storage::grownSince() const {
+    return m_previousAt > 0 ? ago(m_previousAt).replace(" ago", "") : QString();
+}
 
-    // Take the trash's size out of every folder above it, so the page is
-    // right without a rescan.
-    const QStringList trail{".local", "share", "Trash"};
-    if (const storage::Node *found = storage::find(m_root, trail)) {
-        const quint64 freed = found->bytes;
-        storage::Node *node = &m_root;
-        node->bytes -= qMin(node->bytes, freed);
-        for (const QString &name : trail) {
-            auto it = std::find_if(node->children.begin(), node->children.end(),
-                                   [&](const storage::Node &child) { return child.name == name; });
-            if (it == node->children.end())
-                break;
-            node = &*it;
-            node->bytes -= qMin(node->bytes, freed);
-            if (name == "Trash")
-                node->children.clear();
-        }
+QVariantList Storage::stale() const {
+    QVariantList list;
+    const qint64 now = QDateTime::currentSecsSinceEpoch();
+    for (const storage::StaleFile &file : m_stale) {
+        const qint64 months = (now - file.modified) / (30 * 86400);
+        list.append(QVariantMap{
+            {"path", "~/" + file.path},
+            {"size", vitals::bytesText(double(file.bytes))},
+            {"age", months >= 24 ? QString("%1 years").arg(months / 12) : QString("%1 months").arg(months)}});
     }
-    buildSpots();
-    save();
-    emit changed();
-    return ok;
+    return list;
+}
+
+void Storage::revealInside(const QString &relative) const {
+    // Paths come from the saved scan file, so they're checked before use:
+    // relative, no "..", and still inside the home folder once resolved.
+    if (relative.isEmpty() || relative.startsWith('/') || relative.split('/').contains(".."))
+        return;
+    const QString path = QDir::cleanPath(m_home + "/" + relative);
+    if ((path != m_home && !path.startsWith(m_home + "/")) || !QFileInfo::exists(path))
+        return;
+    QDesktopServices::openUrl(QUrl::fromLocalFile(path));
+}
+
+void Storage::revealGrown(int index) {
+    const QVariantList list = grown();
+    if (index >= 0 && index < list.size())
+        revealInside(list[index].toMap().value("path").toString().mid(2));
+}
+
+void Storage::revealStale(int index) {
+    if (index >= 0 && index < m_stale.size())
+        revealInside(QFileInfo(m_stale[index].path).path() == "." ? QString(".")
+                                                                  : QFileInfo(m_stale[index].path).path());
+}
+
+void Storage::revealSpot(int index) {
+    if (index < 0 || index >= m_spots.size())
+        return;
+    // The saved file says which spot this is, but only these folders open.
+    const QString path = m_spots[index].toMap().value("path").toString();
+    const QStringList known{m_home + "/.local/share/Trash", m_home + "/.cache", m_home + "/Downloads",
+                            "/var/cache/pacman/pkg"};
+    if (known.contains(path))
+        QDesktopServices::openUrl(QUrl::fromLocalFile(path));
 }
