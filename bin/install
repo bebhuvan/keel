@@ -1,7 +1,9 @@
 #!/bin/sh
+# Builds the Arch package from scratch (-C cleans makepkg's own build folder,
+# so the hardening flags reach every file) and installs it, asking for the
+# password once.
 set -eu
 
 ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
-"$ROOT/bin/build"
 cd "$ROOT/pkgbuild"
-exec makepkg -fsi "$@"
+exec makepkg -Cfsi "$@"
